@@ -1,0 +1,373 @@
+/* Localizable.strings — Simplified Chinese.
+   Every key is the English source string (see en.lproj comment). Tone
+   follows Razer Synapse 3's official zh-Hans strings where they exist, so
+   muscle memory transfers between the two apps. */
+
+/* ─── Sidebar section titles ──────────────────────────────────── */
+"Sensitivity" = "灵敏度";
+"Report rate" = "轮询率";
+"Scroll" = "滚轮";
+"Buttons" = "按键";
+"Lighting" = "灯效";
+"Power" = "电量";
+"Device" = "设备";
+
+/* ─── Section subtitles (shown in the pane header) ─────────────── */
+"DPI stages" = "DPI 档位";
+"Polling rate" = "轮询率";
+"Wheel direction and smoothing" = "滚轮方向与平滑";
+"Button remap and turbo" = "按键重映射与连点";
+"Scroll wheel LED" = "滚轮 LED";
+"Battery and idle sleep" = "电量与休眠";
+"Hardware and utilities" = "硬件信息与工具";
+
+/* ─── Sidebar footnote (BT-only mode) ─────────────────────────── */
+"Plug in the dongle for DPI, polling rate, and lighting." = "接入 HyperSpeed 接收器可配置 DPI、轮询率与灯效。";
+
+/* ─── Bluetooth banner ─────────────────────────────────────────── */
+"Connected via Bluetooth" = "已通过蓝牙连接";
+"Connected over Bluetooth — idle-sleep needs the dongle." = "已通过蓝牙连接 — 休眠时间需接入 HyperSpeed 接收器。";
+"Works over Bluetooth" = "蓝牙下可用";
+"Needs the dongle" = "需要接收器";
+"Scroll enhancements" = "滚轮增强";
+"Battery" = "电量";
+"DPI stages" = "DPI 档位";
+"Firmware / serial" = "固件 / 序列号";
+"Sleep timer" = "休眠时间";
+"Bluetooth uses a stock HID profile — Razer tuning commands only reach the mouse via the 2.4 GHz dongle." = "蓝牙使用标准 HID 协议，Razer 私有调节指令只能通过 2.4 GHz 接收器发送到鼠标。";
+
+/* ─── Connection pill ─────────────────────────────────────────── */
+"Disconnected" = "未连接";
+"Bluetooth" = "蓝牙";
+"Connected" = "已连接";
+"Idle" = "休眠中";
+
+/* ─── Sensitivity pane ────────────────────────────────────────── */
+"Loading…" = "读取中…";
+"Active stage %lld" = "当前档位 %lld";
+"Cycle with the DPI button" = "使用鼠标 DPI 键切换档位";
+"DPI" = "DPI";
+"Add stage" = "添加档位";
+"%lld of 5" = "%lld / 5";
+"Click to switch to this stage on the mouse" = "点按可即时切换到此档位";
+
+/* ─── Report-rate pane ────────────────────────────────────────── */
+"Bluetooth caps at ~125 Hz on macOS. Dongle unlocks the full range." = "蓝牙下 macOS 会将轮询率限制在约 125 Hz。接入 HyperSpeed 接收器可解锁完整范围。";
+"125 Hz" = "125 Hz";
+"500 Hz" = "500 Hz";
+"1000 Hz" = "1000 Hz";
+
+/* ─── Scroll pane ─────────────────────────────────────────────── */
+"Enhanced scrolling" = "滚轮增强";
+"On" = "开";
+"Off" = "关";
+"Reverses and smooths the wheel. Trackpad untouched." = "反转并平滑鼠标滚轮，不影响触控板。";
+"Direction" = "方向";
+"Reverse vertical scroll" = "反转垂直方向";
+"Reverse horizontal scroll" = "反转水平方向";
+"Pairs with macOS's Natural scrolling — wheel goes Windows-style, trackpad stays natural." = "与 macOS 的自然滚动搭配使用：滚轮变为传统方向，触控板保持自然方向。";
+"Speed" = "速度";
+"Pixels per wheel notch. 1× ≈ macOS default." = "每格滚动的像素数，1× ≈ macOS 默认值。";
+"Smoothing" = "平滑";
+"Interpolate between ticks" = "在两格之间插值";
+"Turns each notch into a short glide. Off keeps raw steps." = "让每一格滚动变成短滑动。关闭后保持原始步进。";
+"Snappy (0%)" = "紧凑 (0%)";
+"Glide (100%)" = "滑动 (100%)";
+"Higher = longer glide, up to ~400 ms. Snappier feels closer to a raw wheel." = "值越大滑动越长，最长约 400 ms。数值小时更贴近原生滚轮的手感。";
+
+/* ─── Power pane ──────────────────────────────────────────────── */
+"Battery level" = "电量";
+"Battery is low — consider replacing the AA" = "电量偏低——建议更换 AA 电池";
+"1× AA. macOS refreshes the reading every ~30 s." = "1 节 AA 电池，macOS 大约每 30 秒刷新一次读数。";
+"1× AA. Smoothed over 30 min to hide AA voltage recovery." = "1 节 AA 电池。读数在 30 分钟窗口内平滑处理，避免 AA 电压恢复带来的跳变。";
+"Idle sleep" = "休眠时间";
+"Requires the HyperSpeed dongle." = "需要 HyperSpeed 接收器。";
+"Mouse is currently set to" = "鼠标当前设为";
+"Mouse reports %lld min — firmware may ignore custom idle time." = "鼠标当前报告为 %lld 分钟——固件可能未采纳自定义休眠时间。";
+"1 min" = "1 分钟";
+"15 min" = "15 分钟";
+"%lld min" = "%lld 分钟";
+"How long without input before the radio sleeps. Shorter = better battery, slower wake." = "无输入后经过多久让无线电进入休眠。值越小越省电，但唤醒稍慢。";
+
+/* ─── Device pane ─────────────────────────────────────────────── */
+"Hardware" = "硬件信息";
+"Product" = "型号";
+"USB VID / PID" = "USB VID / PID";
+"Firmware" = "固件版本";
+"Serial" = "序列号";
+"Connection" = "连接方式";
+"Offline" = "未连接";
+"HyperSpeed dongle (2.4 GHz)" = "HyperSpeed 接收器 (2.4 GHz)";
+"Dongle only" = "仅接收器可用";
+"Preferences" = "偏好设置";
+"Launch at login" = "登录时启动";
+"Start automatically at login." = "登录 macOS 时自动启动。";
+"Utilities" = "工具";
+"Refresh from mouse" = "从鼠标刷新";
+"Show settings.json" = "显示 settings.json";
+"Copy device info" = "复制设备信息";
+"Show log" = "显示日志";
+"Quit" = "退出";
+"Re-read onboard settings" = "重新读取鼠标内置设置";
+"Re-read battery" = "重新读取电量";
+"Mouse not connected" = "鼠标未连接";
+
+/* ─── Buttons pane ────────────────────────────────────────────── */
+"Accessibility permission required" = "需要辅助功能权限";
+"Button remap and scroll enhancements need permission to inject events on your behalf." = "按键重映射与滚轮增强需要 macOS 允许本应用代表你注入输入事件。";
+"Grant Accessibility" = "授予辅助功能权限";
+"After granting, click Recheck below." = "授权后请点击下方“重新检测”。";
+"Recheck" = "重新检测";
+"Drag to reposition callouts" = "拖动可重新定位标注";
+"Align labels" = "对齐标签";
+"Reset all" = "全部重置";
+"Done" = "完成";
+"Edit hotspots" = "编辑热点";
+"Click Done to save positions." = "点击“完成”以保存位置。";
+"Fine-tune where callouts point at the mouse image." = "微调标注在鼠标图上的位置。";
+
+/* ─── Sidebar group labels ────────────────────────────────────── */
+"Configuration" = "配置项";
+
+/* ─── Profiles ────────────────────────────────────────────────── */
+"Switch profile" = "切换配置文件";
+"New profile" = "新建配置文件";
+"Duplicate active" = "复制当前配置";
+"Rename active" = "重命名当前配置";
+"Delete active" = "删除当前配置";
+"Rename profile" = "重命名配置文件";
+"Profile name" = "配置名称";
+"Cancel" = "取消";
+"Save" = "保存";
+"Delete" = "删除";
+"1 profile" = "1 个配置";
+"%lld profiles" = "%lld 个配置";
+"This can't be undone. All settings on this profile will be lost." = "此操作无法撤销，该配置文件下的所有设置都将丢失。";
+"Delete profile \"%@\"?" = "确定要删除配置 “%@” 吗？";
+
+/* ─── Remap picker ────────────────────────────────────────────── */
+"Default" = "默认";
+"AI Launcher" = "AI 助手启动器";
+"Keyboard" = "键盘";
+"Mouse" = "鼠标";
+"Multimedia" = "多媒体";
+"Launch" = "启动";
+"macOS Shortcuts" = "macOS 快捷键";
+"Text Function" = "文本输入";
+"Disable" = "禁用";
+"Restore original behavior." = "恢复此按键的原始功能。";
+"ChatGPT, Claude, Gemini, or another AI chat." = "打开 ChatGPT、Claude、Gemini 或其他 AI 对话。";
+"Keyboard shortcut or common action." = "自定义快捷键或常用键盘动作。";
+"Emit another mouse action." = "发出其它鼠标动作。";
+"Switch DPI stage." = "切换 DPI 档位。";
+"Volume, playback, brightness." = "音量、播放、亮度控制。";
+"Open a URL, file, or app." = "打开一个 URL、文件或应用。";
+"Common macOS shortcuts." = "常用的 macOS 系统快捷键。";
+"Type text at the cursor." = "在光标处输入一段文字。";
+"Swallow the press — do nothing." = "吞掉这次按键——不执行任何动作。";
+"Remap %@" = "重映射 %@";
+"Currently: %@" = "当前：%@";
+"Passes the click through as-is." = "按原样传递给 macOS。";
+"Swallows the button press." = "吞掉这次按键。";
+"Prefer installed app" = "优先使用已安装应用";
+"Always use web" = "始终使用网页版";
+"Launches installed app" = "启动已安装应用";
+"Opens %@ in your browser" = "在浏览器中打开 %@";
+"Enable Turbo" = "启用连点";
+"Repeats the action while held. Speed is presses per second." = "按住时重复执行该动作。速度为每秒触发次数。";
+"Speed (press/sec)" = "速度（次 / 秒）";
+"Presses per second while the button is held." = "按住按键期间每秒触发的次数。";
+"Text to type" = "要输入的文字";
+"Types text at the cursor." = "按下按键时在光标处输入这段文字。";
+"Shortcut" = "快捷键";
+"…or type a URL below" = "…或在下方输入 URL";
+"Display name" = "显示名称";
+"URL or file:// path" = "URL 或 file:// 路径";
+"Currently launches" = "当前启动";
+
+/* ─── Sensitivity actions ─────────────────────────────────────── */
+"Cycle to next DPI stage" = "切换到下一档 DPI";
+"Cycle to previous DPI stage" = "切换到上一档 DPI";
+"Go to DPI stage %lld" = "跳到 DPI 档位 %lld";
+"Move to the next stage in the DPI list." = "在 DPI 列表中前进一档。";
+"Move to the previous stage in the DPI list." = "在 DPI 列表中后退一档。";
+"Go to a specific stage" = "跳到指定档位";
+
+/* ─── Lighting pane ───────────────────────────────────────────── */
+"Effect" = "灯效";
+"Brightness" = "亮度";
+"Color" = "颜色";
+"Custom" = "自选";
+"Presets" = "预设";
+"Slow" = "慢";
+"Medium" = "中";
+"Fast" = "快";
+"Very fast" = "很快";
+"Applies to the scroll wheel LED (the only light on this mouse)." = "作用于滚轮 LED（此鼠标唯一的可编程灯）。";
+"LED off." = "关闭 LED。";
+"Solid color." = "纯色。";
+"Fades in and out." = "呼吸渐变。";
+"Cycles the rainbow." = "循环彩虹。";
+"Rainbow scrolls across the wheel." = "彩虹沿滚轮流动。";
+"Flashes on click." = "点击时闪烁。";
+"Set to #%@" = "设为 #%@";
+
+/* Lighting mode picker labels */
+"Static" = "纯色";
+"Breath" = "呼吸";
+"Spectrum" = "光谱";
+"Wave" = "波浪";
+"Reactive" = "触发";
+
+/* Wave direction labels */
+"Left → Right" = "左 → 右";
+"Right → Left" = "右 → 左";
+
+/* ─── Tray tooltip parts ──────────────────────────────────────── */
+"Bluetooth · Idle" = "蓝牙 · 休眠中";
+"Dongle" = "接收器";
+"Dongle · Idle" = "接收器 · 休眠中";
+"Bluetooth · %lld%%" = "蓝牙 · %lld%%";
+"Dongle · %lld%%" = "接收器 · %lld%%";
+"Dongle · Idle · %lld%%" = "接收器 · 休眠中 · %lld%%";
+
+/* ─── Tray menu ───────────────────────────────────────────────── */
+"Profile" = "配置文件";
+"DPI stage" = "DPI 档位";
+"Stage %lld — %@ DPI" = "档位 %lld — %@ DPI";
+"Open panel" = "打开设置";
+"Refresh" = "刷新";
+"Dismiss" = "关闭";
+
+/* ─── App main menu ───────────────────────────────────────────── */
+"About BSK V3 X HS" = "关于 BSK V3 X HS";
+"Quit BSK V3 X HS" = "退出 BSK V3 X HS";
+"Hide" = "隐藏";
+"Hide Others" = "隐藏其他";
+"Edit" = "编辑";
+"Undo" = "撤销";
+"Redo" = "重做";
+"Cut" = "剪切";
+"Copy" = "拷贝";
+"Paste" = "粘贴";
+"Select All" = "全选";
+
+/* ─── Media keys ──────────────────────────────────────────────── */
+"Volume up" = "音量+";
+"Volume down" = "音量-";
+"Mute" = "静音";
+"Play / Pause" = "播放 / 暂停";
+"Next track" = "下一曲";
+"Previous track" = "上一曲";
+"Brightness up" = "亮度+";
+"Brightness down" = "亮度-";
+
+/* ─── Synthetic mouse actions ─────────────────────────────────── */
+"Double Click" = "双击";
+"Scroll Up" = "向上滚动";
+"Scroll Down" = "向下滚动";
+"Scroll Left" = "向左滚动";
+"Scroll Right" = "向右滚动";
+"Boss Key (hide app)" = "老板键 (隐藏应用)";
+"Left click" = "左键";
+"Right click" = "右键";
+"Middle click" = "中键";
+
+/* ─── Mouse button labels ─────────────────────────────────────── */
+"Left Click" = "左键";
+"Right Click" = "右键";
+"Scroll Click" = "滚轮点击";
+"Mouse Button 4" = "鼠标按键 4";
+"Mouse Button 5" = "鼠标按键 5";
+"Cycle Up Sensitivity Stages" = "循环切换 DPI 档位";
+
+/* ─── macOS shortcut presets ──────────────────────────────────── */
+"Show Desktop" = "显示桌面";
+"Mission Control" = "调度中心";
+"App windows" = "应用窗口";
+"Cycle apps (⌘⇥)" = "切换应用 (⌘⇥)";
+"Cycle windows (⌘`)" = "切换窗口 (⌘`)";
+"Close window (⌘W)" = "关闭窗口 (⌘W)";
+"Quit app (⌘Q)" = "退出应用 (⌘Q)";
+"Hide app (⌘H)" = "隐藏应用 (⌘H)";
+"Minimize (⌘M)" = "最小化 (⌘M)";
+"Spotlight (⌘Space)" = "聚焦搜索 (⌘Space)";
+"Lock screen (⌃⌘Q)" = "锁定屏幕 (⌃⌘Q)";
+"Screenshot (⇧⌘3)" = "截取整屏 (⇧⌘3)";
+"Area screenshot (⇧⌘4)" = "截取区域 (⇧⌘4)";
+"Screenshot tools (⇧⌘5)" = "截屏工具 (⇧⌘5)";
+"Zoom in (⌘=)" = "放大 (⌘=)";
+"Zoom out (⌘-)" = "缩小 (⌘-)";
+
+/* ─── Auto-apply footer ───────────────────────────────────────── */
+"Applying…" = "应用中…";
+"Saved" = "已保存";
+
+/* ─── Low-battery behaviour ───────────────────────────────────── */
+"Low battery" = "低电量";
+"Notify at threshold" = "达到阈值时通知";
+"Send a macOS notification once when battery drops below the threshold." = "电量首次跌破阈值时，发送一次 macOS 系统通知。";
+"Dim LED at threshold" = "达到阈值时降亮";
+"Cut LED brightness in half to extend AA life. Doesn't touch flash." = "将 LED 亮度减半以延长 AA 电池寿命，不写入内置存储。";
+"Battery at %lld%% — replace the AA soon." = "电量剩余 %lld%% — 建议尽快更换 AA 电池。";
+"BSK V3 X HS" = "BSK V3 X HS";
+
+/* ─── Profile import / export ─────────────────────────────────── */
+"Export profile" = "导出配置";
+"Import profile" = "导入配置";
+"Export failed" = "导出失败";
+"Import failed" = "导入失败";
+"No active profile to export." = "当前没有可导出的配置。";
+"This file uses profile format v%lld, newer than what this app understands." = "文件使用的是版本 v%lld 的配置格式，此版本超出本应用支持范围。";
+"This file was exported by \"%@\", not by BSK V3 X HS." = "此文件由 “%@” 导出，并非 BSK V3 X HS 的配置文件。";
+
+/* ─── Language picker ─────────────────────────────────────────── */
+"Language" = "语言";
+"Applies after the app restarts." = "应用重新启动后生效。";
+"Restart to change language" = "需要重启以切换语言";
+"The new language takes effect after the app relaunches." = "新语言将在应用重新启动后生效。";
+"Relaunch now" = "立即重启";
+"Later" = "稍后";
+
+/* ─── Profiles pane (auto-switch) ─────────────────────────────── */
+"Profiles" = "配置文件";
+"Auto-switch by focused app" = "根据当前应用自动切换";
+"Auto-switch" = "自动切换";
+"Bring an app to the front and this profile activates. Move to any app that's not linked, and the default profile takes over." = "把绑定的应用切到前台，就会自动激活此配置；切换到没有绑定的应用时，回到默认配置。";
+"Trigger apps for" = "以下应用触发";
+"Add app…" = "添加应用…";
+"Choose an app to link" = "选择要绑定的应用";
+"Link" = "绑定";
+"Couldn't read that app's bundle ID" = "无法读取该应用的 Bundle ID";
+"The picked app is missing a valid Info.plist. Pick a different app." = "该应用缺少可用的 Info.plist，请换一个应用。";
+"1 app" = "1 个应用";
+"%lld apps" = "%lld 个应用";
+"Use this profile as the default" = "将此配置设为默认";
+"Currently defaulting to %@." = "当前默认为 %@。";
+"Fallback when the focused app doesn't match any trigger list." = "当前台应用不属于任何绑定列表时，回退到此配置。";
+"No apps linked yet. Add one below to make this profile activate on focus." = "尚未绑定任何应用。在下方添加应用后，切换到该应用时会自动启用此配置。";
+"Remove this app from the trigger list" = "从触发列表中移除该应用";
+"Rename" = "重命名";
+
+/* ─── AI Launcher additions (CLI section, subtitles) ──────────── */
+"Applies to chat apps below. CLI shortcuts always open in Terminal." = "仅作用于下方的对话应用，CLI 快捷方式始终使用终端打开。";
+"Command-line tools" = "命令行工具";
+"Opens a Terminal window and runs the command. Greyed rows aren't installed on this Mac." = "在新的终端窗口中运行该命令。灰色项表示本机未安装。";
+"Runs `%@` in a new Terminal window" = "在新的终端窗口中运行 `%@`";
+"`%@` not installed" = "未安装 `%@`";
+"Command not found on PATH. Install it, then reopen this picker." = "PATH 中未找到该命令，请安装后重新打开此选择器。";
+
+/* ─── Sensitivity pane (System-Settings redesign) ─────────────── */
+"Sensitivity Stages" = "灵敏度档位";
+"Stage %lld" = "档位 %lld";
+"Add Stage" = "添加档位";
+"Enable X-Y Sensitivity" = "启用 X-Y 独立灵敏度";
+"Remove this stage" = "移除此档位";
+
+/* ─── Reporting pane (new copy) ───────────────────────────────── */
+"Higher rates reduce click and movement latency, at the cost of slightly higher battery use." = "更高的轮询率可降低点击与光标延迟，代价是电池消耗略增。";
+"Bluetooth is capped at ~125 Hz on macOS. Connect via the 2.4 GHz dongle for 500 or 1000 Hz." = "蓝牙下 macOS 会将轮询率限制在约 125 Hz。要用 500 或 1000 Hz 请接入 2.4 GHz 接收器。";
+
+/* ─── Low-battery notification (multi-drop copy) ──────────────── */
+"Sends a macOS notification when battery crosses the threshold, and again on each further drop." = "首次跌破阈值时发送 macOS 通知；之后每再往下跌都会重新通知。";
+

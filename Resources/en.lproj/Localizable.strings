@@ -1,0 +1,10 @@
+/* Localizable.strings — English (development region).
+
+   Keys ARE the English display strings, so this file is intentionally
+   minimal — SwiftUI/NSLocalizedString falls back to the key when no entry
+   is found in the current locale's .strings, which gives the correct
+   English UI without duplication.
+
+   Left non-empty as a marker so the .lproj folder ends up in the .app
+   bundle even if no override is ever added. */
+"__present" = "en";

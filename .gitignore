@@ -1,0 +1,24 @@
+# Build outputs
+build/
+.build/
+DerivedData/
+dist/
+
+# SwiftPM
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+
+# macOS
+.DS_Store
+._*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local overrides
+*.local
+*.local.*
