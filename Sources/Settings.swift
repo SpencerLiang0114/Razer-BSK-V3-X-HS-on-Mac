@@ -321,10 +321,22 @@ final class SettingsStore: ObservableObject {
     }
 
     init() {
-        let support = try! FileManager.default.url(
+        // ~/Library/Application Support. The lookup only throws when the
+        // home directory is unreadable, which in practice means a broken
+        // login session — but crashing on launch is a poor way to say so, and
+        // this runs before any UI exists to report it. Fall back to the
+        // hard-coded path so the app starts and settings still persist.
+        let support: URL
+        if let dir = try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true
-        )
+        ) {
+            support = dir
+        } else {
+            support = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+            Log.warn("Application Support lookup failed; falling back to \(support.path)")
+        }
         let base = support.appendingPathComponent("BSKV3XHS", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.fileURL = base.appendingPathComponent("settings.json")

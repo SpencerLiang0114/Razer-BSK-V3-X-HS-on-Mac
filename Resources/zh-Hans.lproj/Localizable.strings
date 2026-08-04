@@ -31,7 +31,7 @@
 "Needs the dongle" = "需要接收器";
 "Scroll enhancements" = "滚轮增强";
 "Battery" = "电量";
-"DPI stages" = "DPI 档位";
+/* "DPI stages" is defined once in the section-subtitles block above. */
 "Firmware / serial" = "固件 / 序列号";
 "Sleep timer" = "休眠时间";
 "Bluetooth uses a stock HID profile — Razer tuning commands only reach the mouse via the 2.4 GHz dongle." = "蓝牙使用标准 HID 协议，Razer 私有调节指令只能通过 2.4 GHz 接收器发送到鼠标。";
@@ -194,6 +194,20 @@
 "Display name" = "显示名称";
 "URL or file:// path" = "URL 或 file:// 路径";
 "Currently launches" = "当前启动";
+/* Keyboard-capture pane: the modifier/key builder and its live preview. */
+"Modifiers" = "修饰键";
+"Key" = "按键";
+"Hold %@" = "按住 %@";
+"Pick modifiers, or modifiers + a key" = "选择修饰键，或修饰键 + 一个按键";
+"Clear" = "清除";
+/* Mouse-action pane: section headers over the button grid. */
+"Mouse buttons" = "鼠标按键";
+"Extended actions" = "扩展动作";
+/* Shown when the mouse itself has the button remapped in firmware, so
+   macOS never sees the original button number. */
+"Firmware-remapped button" = "固件已重映射的按键";
+/* Launch pane: file picker for choosing a target app. */
+"Choose Application…" = "选择应用…";
 
 /* ─── Sensitivity actions ─────────────────────────────────────── */
 "Cycle to next DPI stage" = "切换到下一档 DPI";
@@ -221,6 +235,8 @@
 "Rainbow scrolls across the wheel." = "彩虹沿滚轮流动。";
 "Flashes on click." = "点击时闪烁。";
 "Set to #%@" = "设为 #%@";
+/* VoiceOver label on each colour swatch. */
+"Color #%@" = "颜色 #%@";
 
 /* Lighting mode picker labels */
 "Static" = "纯色";
@@ -353,6 +369,7 @@
 "Bring an app to the front and this profile activates. Move to any app that's not linked, and the default profile takes over." = "把绑定的应用切到前台，就会自动激活此配置；切换到没有绑定的应用时，回到默认配置。";
 "Trigger apps for" = "以下应用触发";
 "Add app…" = "添加应用…";
+"Choose from Applications…" = "从「应用程序」中选择…";
 "Choose an app to link" = "选择要绑定的应用";
 "Link" = "绑定";
 "Couldn't read that app's bundle ID" = "无法读取该应用的 Bundle ID";

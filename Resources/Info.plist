@@ -35,6 +35,13 @@
     <string>Read the mouse's battery level over Bluetooth.</string>
     <key>NSInputMonitoringUsageDescription</key>
     <string>Read the mouse's battery, DPI, and lighting state, and detect when it wakes. Without this the app cannot talk to the mouse at all.</string>
+    <!-- Required for the "Command-line tools" button action, which drives
+         Terminal via AppleScript (see ButtonMap.launchInTerminal). macOS
+         10.14+ refuses to show the Automation consent prompt when this key
+         is absent and fails the send with errAEEventNotPermitted (-1743),
+         so the CLI presets would silently do nothing on every click. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Open Terminal and run the command you assigned to a mouse button.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>

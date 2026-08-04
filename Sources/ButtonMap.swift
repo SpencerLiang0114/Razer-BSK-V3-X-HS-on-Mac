@@ -1077,8 +1077,11 @@ final class ButtonMap: ObservableObject {
                 let msg = (error[NSAppleScript.errorMessage] as? String) ?? "unknown"
                 Log.warn("Terminal launch failed: errorNumber=\(num) message=\(msg)")
                 // -1743 = "Not authorized to send Apple events to Terminal"
-                // — the Automation TCC prompt for Terminal was denied
-                // (or hasn't been shown yet on some macOS builds).
+                // — the Automation TCC prompt for Terminal was denied.
+                // If this fires *without* a prompt ever appearing, check that
+                // Info.plist still carries NSAppleEventsUsageDescription:
+                // macOS suppresses the prompt entirely when that key is
+                // missing, which reads identically to a denial from here.
                 let hint: String
                 if num == -1743 {
                     hint = String(localized: "Terminal automation blocked. Enable it in System Settings → Privacy & Security → Automation.")
