@@ -1,7 +1,6 @@
 import Foundation
 import Combine
 import AppKit
-@preconcurrency import UserNotifications
 
 // ─── DeviceController ────────────────────────────────────────────────
 // The orchestrator. Owns transport + monitors + published status. All
@@ -39,6 +38,19 @@ final class DeviceController: ObservableObject {
     /// stack retries (each of which fails after several hundred ms).
     private var lastProbeFailedAt: Date = .distantPast
     private let probeFailureCooldown: TimeInterval = 10
+    /// Same idea as `lastProbeFailedAt`, but for `reconcileActiveStage`.
+    /// A mouse in "half-sleep" (HID input still arrives, but the Razer
+    /// vendor endpoint has gone quiet) makes every dpiStagesRead time
+    /// out after 20 × ~120 ms of noResponse. Without a cooldown, the
+    /// input-activity and pump paths would keep firing reconciles every
+    /// 0.7 s / 1.5 s and burning ~2–3 s of HID traffic each time. Once
+    /// a reconcile fails we back off for `reconcileFailureCooldown`
+    /// before letting either path retry; a genuinely-awake mouse
+    /// bounces out of this within one probe cycle because InputActivity
+    /// re-arms status.awake and the next successful battery probe
+    /// resets the timestamp.
+    private var lastReconcileFailedAt: Date = .distantPast
+    private let reconcileFailureCooldown: TimeInterval = 30
     /// If the user's input arrived within this window, we treat the mouse
     /// as definitively awake even if a background probe times out. Feature-
     /// report exchange competes with the mouse's active HID input traffic
@@ -52,6 +64,14 @@ final class DeviceController: ObservableObject {
     /// the mouse itself, which we have no other way to observe.
     private var lastStageReadAt: Date = .distantPast
     private let stageReadTTL: TimeInterval = 10
+    /// Faster ceiling used only when input activity taps `markAlive()`.
+    /// The reconcile timer alone gates on `stageReconcileTTL` (1.5 s) and
+    /// requires the panel to be visible; during gaming with the panel
+    /// closed the physical DPI-cycle button would otherwise take up to
+    /// pumpBackgroundInterval (15 s) to surface, which kills the "instant
+    /// HUD" feel. Piggybacking on input events keeps polling at zero
+    /// while the mouse is idle and drops to ~0.7 s while it's in use.
+    private let activityStageReconcileTTL: TimeInterval = 0.7
     /// One-in-flight guard for `reconcileActiveStage`. Foreground fast-poll
     /// (1 s) and input-activity taps can both queue reconciles, and the
     /// Device queue serializes them — so without this flag, a mouse that's
@@ -126,8 +146,13 @@ final class DeviceController: ObservableObject {
     /// stop pushing after a radio nap.
     private var lastGATTReadAt: Date = .distantPast
     private let pumpForegroundInterval: TimeInterval = 1.5
-    private let pumpBackgroundInterval: TimeInterval = 15
-    private let dongleKeepaliveTTL: TimeInterval = 15
+    /// 5 s (was 15 s) so disconnect / sleep transitions surface faster
+    /// in the tray UI. Reads as ~3× more radio wakes while the mouse
+    /// is idle-awake, which is a small AA hit but well under 10% of
+    /// battery lifetime by design. A truly asleep or unplugged mouse
+    /// doesn't respond at all, so the poll is a no-op there.
+    private let pumpBackgroundInterval: TimeInterval = 5
+    private let dongleKeepaliveTTL: TimeInterval = 5
     private let stageReconcileTTL: TimeInterval = 1.5
     private let btBatteryPollTTL: TimeInterval = 30
     private let gattRereadTTL: TimeInterval = 120
@@ -181,7 +206,6 @@ final class DeviceController: ObservableObject {
         wireInput()
         wireSleepWake()
         startPump()
-        requestNotificationAuthorizationOnLaunch()
         // GATT feeds smoothed battery on every peripheral update, on any
         // transport (dongle mode still gets updates if the mouse's BLE
         // stack is paired in the background — harmless duplication with
@@ -209,11 +233,11 @@ final class DeviceController: ObservableObject {
         // Push persisted button map to CGEventTap on launch. Runs over any
         // transport (BT included) — the tap is OS-level, not HID-level.
         let current = SettingsStore.shared.current
-        ButtonMap.shared.apply(current.buttons)
-        // Same for the scroll transformer. Also transport-agnostic — its
-        // input comes from the same OS event tap ButtonMap owns.
-        ScrollTransformer.shared.settings = current.scroll
-        ButtonMap.shared.scrollSettingsChanged()
+        // Buttons + scroll in one call so the event tap is built once rather
+        // than torn down and rebuilt between the two. Scroll is transport-
+        // agnostic like the button map — its input comes from the same OS
+        // event tap ButtonMap owns.
+        ButtonMap.shared.applyProfile(buttons: current.buttons, scroll: current.scroll)
         // Wire sensitivity-cycle actions so buttons mapped to
         // "Cycle DPI stage" can reach the mouse via us.
         ButtonMap.shared.onSensitivity = { [weak self] action in
@@ -227,7 +251,25 @@ final class DeviceController: ObservableObject {
         // the hotplug callback doesn't fire for an already-connected device.
         // The pump (started above) then takes over for the recurring reads.
         switch status.connection {
-        case .dongle:    Task { await self.probe(profile: .short) }
+        case .dongle:
+            Task { [weak self] in
+                guard let self else { return }
+                await self.probe(profile: .short)
+                // Push disk state to mouse RAM once probe confirms the mouse
+                // is awake. If the previous session left RAM in a non-default
+                // state (e.g., a low-battery LED dim that never got cleared
+                // before quit), apply() with `lastApplied == nil` treats
+                // every field as dirty and re-ships it fresh. When the mouse
+                // is asleep the applyActiveProfile HID writes would just
+                // noResponse-timeout — defer via `needsInitialApply` so
+                // markAlive() can retry on the next wake.
+                if self.status.awake {
+                    self.applyActiveProfile(reason: "initial launch")
+                } else {
+                    Log.info("initial launch: mouse asleep — deferring apply until wake")
+                    self.needsInitialApply = true
+                }
+            }
         case .bluetooth:
             pollBluetoothBattery()
             lastBTBatteryPollAt = Date()
@@ -257,9 +299,9 @@ final class DeviceController: ObservableObject {
         // profile lists that bundle ID in its `triggerBundleIDs`. If yes,
         // activate that profile. If not, fall back to the user's chosen
         // default profile (if any). No default → no change.
-        appSwitchWatcher.onFocusChange = { [weak self] bundleID in
+        appSwitchWatcher.onFocusChange = { [weak self] identity in
             Task { @MainActor [weak self] in
-                self?.handleFocusedApp(bundleID)
+                self?.handleFocusedApp(identity)
             }
         }
         appSwitchWatcher.start()
@@ -281,16 +323,51 @@ final class DeviceController: ObservableObject {
     /// Returning early when the target equals the currently-active profile
     /// keeps a tight ⌘⇥ loop between mapped and unmapped apps from firing
     /// pointless `setActive` writes.
-    private func handleFocusedApp(_ bundleID: String?) {
+    private func handleFocusedApp(_ identity: FocusedAppIdentity) {
         let file = SettingsStore.shared.file
+        // Trigger list entries can be:
+        //   • a plain bundle identifier          — matches when the
+        //     focused app's `bundleIdentifier` equals the entry
+        //   • `exe:<executable-name>`            — matches when the
+        //     focused app's `executableURL.lastPathComponent` equals
+        //     the entry after the prefix. Used for apps that never
+        //     register a bundle ID (Java-based Minecraft opened by a
+        //     launcher, Electron dev builds, Steam-launched games).
+        let exeKey = identity.executableName.map { "exe:\($0)" }
         let matched: UUID? = {
-            guard let bid = bundleID else { return nil }
-            return file.profiles.first { $0.triggerBundleIDs.contains(bid) }?.id
+            for profile in file.profiles {
+                for trig in profile.triggerBundleIDs {
+                    if let bid = identity.bundleID, trig == bid { return profile.id }
+                    if let key = exeKey, trig == key { return profile.id }
+                }
+            }
+            return nil
         }()
         let target = matched ?? file.defaultID
         guard let target, target != file.activeID else { return }
-        Log.info("auto-switch: focused=\(bundleID ?? "nil") → profile \(target.uuidString.prefix(8))")
+        let focusedLabel = identity.bundleID ?? exeKey ?? "nil"
+        Log.info("auto-switch: focused=\(focusedLabel) → profile \(target.uuidString.prefix(8))")
         SettingsStore.shared.setActive(target)
+        // Surface the switch as a HUD so the user knows a profile change
+        // just happened silently. Only fires on auto-switch (this code
+        // path); manual sidebar clicks skip the HUD to avoid double
+        // feedback since the sidebar itself already highlights the
+        // selected profile. Minimal: just the profile name — no reason
+        // subtitle, which reads too "AI-designed" per the user.
+        //
+        // Gate on the mouse actually being reachable. When the dongle is
+        // plugged in but the mouse is powered off, `status.awake` is
+        // false — flashing a "switched to Minecraft" HUD on top of a
+        // dead mouse is a lie: the button map physically can't respond
+        // yet, and the user reads it as "the app is doing things I
+        // didn't ask for". The activeID still moves so that when the
+        // mouse comes back on, applyActiveProfile's queued apply pushes
+        // the right profile — we just skip the visible confirmation
+        // until the mouse can actually honour it.
+        guard status.awake && status.present else { return }
+        if let profile = SettingsStore.shared.file.profiles.first(where: { $0.id == target }) {
+            SystemHUD.shared.showProfileSwitch(name: profile.name)
+        }
     }
 
     /// Re-align the mouse + software layers with the currently-active profile.
@@ -321,9 +398,8 @@ final class DeviceController: ObservableObject {
         lightingFlashTask?.cancel(); lightingFlashTask = nil
 
         // OS-level features (event tap) — cheap, always safe, transport-agnostic.
-        ButtonMap.shared.apply(new.buttons)
-        ScrollTransformer.shared.settings = new.scroll
-        ButtonMap.shared.scrollSettingsChanged()
+        // One call → one tap rebuild.
+        ButtonMap.shared.applyProfile(buttons: new.buttons, scroll: new.scroll)
 
         // status.settings drives idle-timeout, cycle-stage bounds, and the
         // low-battery watcher — flip it right away so those behaviors don't
@@ -331,15 +407,24 @@ final class DeviceController: ObservableObject {
         // sleeping mouse.
         status.settings = new
 
-        // Low-battery latches are keyed to the previous profile's threshold.
-        // Reset them so the new profile's threshold re-evaluates against the
-        // current battery reading (e.g., switching from a 15% profile latched
-        // at 12% to a 25% profile with battery at 20% should immediately
-        // fire the new profile's alert / dim).
-        lowBatteryLatched = false
-        lastNotifiedBatteryPct = nil
+        // Low-battery latches are keyed to the previous profile's
+        // threshold. On profile switch we prime them silently against
+        // the CURRENT reading so a static-low battery doesn't re-fire
+        // the HUD every time the user swaps profiles — the reading
+        // didn't move, only the threshold under it did. Dim path is
+        // still emitted (LED brightness has to match the new profile's
+        // setting) so `applyLowBatteryDim` may fire.
+        //
+        // Case where battery is unknown (fresh launch, disconnected):
+        // just reset. The next probe will land via `setSmoothedBattery`
+        // which will pick up the seed via `needsLowBatterySeed`.
         lastDimmedBrightness = nil
-        if let pct = status.battery { checkLowBatteryEvent(pct) }
+        if let pct = status.battery {
+            seedLowBatteryWatcher(pct: pct)
+        } else {
+            lowBatteryWatcher.resetLatches()
+            needsLowBatterySeed = true
+        }
 
         // HID push. `apply()` is delta-based against `lastApplied` — when
         // hardware already matches the new profile (typical after a switch
@@ -454,13 +539,17 @@ final class DeviceController: ObservableObject {
     ///   the caller schedules a single trailing `commitToFlash: true` call
     ///   after the user has settled on a value.
     func applyLighting(_ lighting: LightingSettings, commitToFlash: Bool = true) async throws {
+        // Capture the write-target profile so a mid-flight switch can't
+        // steer this payload into a different profile's disk record.
+        let intendedProfileID = SettingsStore.shared.file.activeID
         // Bluetooth: vendor commands don't reach the mouse. Commit to disk
         // only on the final flash commit — mid-drag RAM ticks stay
         // ephemeral so a paused-mid-drag user doesn't end up with a
         // random-intermediate color persisted to disk. The LED will pick
         // up the settled state on the next dongle write.
         guard status.connection == .dongle else {
-            if commitToFlash {
+            if commitToFlash,
+               SettingsStore.shared.file.activeID == intendedProfileID {
                 SettingsStore.shared.updateActive { $0.lighting = lighting }
                 status.settings.lighting = lighting
             }
@@ -490,9 +579,14 @@ final class DeviceController: ObservableObject {
             lastRAMLighting = lighting
             // Publish to disk + status only on the flash commit — the
             // apply() invariant is that disk mirrors what's actually
-            // persisted on the mouse.
-            SettingsStore.shared.updateActive { $0.lighting = lighting }
-            status.settings.lighting = lighting
+            // persisted on the mouse. Guard against a profile switch
+            // landing between our HID awaits and this disk write.
+            if SettingsStore.shared.file.activeID == intendedProfileID {
+                SettingsStore.shared.updateActive { $0.lighting = lighting }
+                status.settings.lighting = lighting
+            } else {
+                Log.info("applyLighting: activeID moved mid-flight — skipping lighting disk write to protect other profile")
+            }
         } else {
             // Interactive path — write to RAM only. Delta-check against the
             // last RAM state so a rapid ColorPicker drag that lands twice
@@ -524,6 +618,7 @@ final class DeviceController: ObservableObject {
         // programmatic caller (e.g. a bound button action arriving over BT).
         guard status.connection == .dongle else { throw DeviceError.notPresent }
         let previousActive = previous.dpi.activeStage
+        let intendedProfileID = SettingsStore.shared.file.activeID
         // Optimistic UI so the badge highlights instantly. Targeted write —
         // full-replace would clobber any concurrent lighting edit landing
         // via applyLighting's fast path.
@@ -536,7 +631,14 @@ final class DeviceController: ObservableObject {
             status.settings.dpi.activeStage = previousActive
             throw error
         }
-        SettingsStore.shared.updateActive { $0.dpi.activeStage = index }
+        // Profile guard: only persist to the profile this click was meant
+        // for. A mid-flight profile switch would otherwise stamp the new
+        // active profile's stage with a value the user didn't pick there.
+        if SettingsStore.shared.file.activeID == intendedProfileID {
+            SettingsStore.shared.updateActive { $0.dpi.activeStage = index }
+        } else {
+            Log.info("setActiveStage: activeID moved mid-flight — skipping disk write")
+        }
         lastApplied?.dpi.activeStage = index
         // Push the reconcile TTL forward so the opportunistic hardware read
         // doesn't fire in the next 10 s and re-check something we just wrote.
@@ -563,11 +665,17 @@ final class DeviceController: ObservableObject {
         // value; on error it stays at whatever was last known-good.
         applyInFlight = true
         defer { applyInFlight = false }
+        // Capture the profile ID this apply is intended for. If the user
+        // switches profiles while our HID awaits are in flight, we must
+        // NOT let mergeNonLighting/updateActive write the pending payload
+        // into whichever profile is active by the time the writes finish
+        // — that would silently spill one profile's edits into another.
+        // Every disk-persistence call below checks against this snapshot.
+        let intendedProfileID = SettingsStore.shared.file.activeID
         // Software-side features first — no HID to fail, safe to commit
         // immediately. They also work over Bluetooth (the tap is OS-level).
-        ButtonMap.shared.apply(settings.buttons)
-        ScrollTransformer.shared.settings = settings.scroll
-        ButtonMap.shared.scrollSettingsChanged()
+        // One call → one tap rebuild.
+        ButtonMap.shared.applyProfile(buttons: settings.buttons, scroll: settings.scroll)
 
         // Vendor writes only reach the mouse via the dongle. Over BT (or
         // fully disconnected) commit the software-side fields to disk and
@@ -577,6 +685,10 @@ final class DeviceController: ObservableObject {
         // disk-persistence half of the write), so we skip it here to
         // avoid clobbering a concurrent lighting edit.
         guard status.connection == .dongle else {
+            guard SettingsStore.shared.file.activeID == intendedProfileID else {
+                Log.info("apply (BT): activeID moved mid-flight — skipping disk write to protect other profile")
+                return
+            }
             mergeNonLighting(from: settings)
             status.error = nil
             return
@@ -602,6 +714,11 @@ final class DeviceController: ObservableObject {
         committed.scroll = settings.scroll
         committed.hotspotOverrides = settings.hotspotOverrides
         committed.calloutOverrides = settings.calloutOverrides
+        // lowBattery is app-side only — no HID write to succeed or fail —
+        // so treat it like buttons/scroll. Missing it here made every apply
+        // over the dongle path silently revert the user's threshold slider
+        // to whatever lastApplied carried.
+        committed.lowBattery = settings.lowBattery
 
         do {
             // Lighting first — LED effect timer restarts on each write, so
@@ -650,14 +767,27 @@ final class DeviceController: ObservableObject {
             // would then clobber that fresh value with our (stale)
             // captured snapshot. Same reasoning for `status.settings`
             // and `lastApplied`.
-            mergeNonLighting(from: committed)
-            if lightChanged {
-                SettingsStore.shared.updateActive { $0.lighting.effect = committed.lighting.effect }
-                status.settings.lighting.effect = committed.lighting.effect
-            }
-            if brightChanged {
-                SettingsStore.shared.updateActive { $0.lighting.brightness = committed.lighting.brightness }
-                status.settings.lighting.brightness = committed.lighting.brightness
+            //
+            // Profile guard: if the active profile changed while our HID
+            // awaits were in flight, this payload belongs to a profile
+            // that is no longer the write target. Persist `lastApplied`
+            // (internal state, tracks what actually reached the mouse)
+            // but skip the disk / status writes — those would land in the
+            // wrong profile. The next apply against the now-active
+            // profile will run and correct the mouse from there.
+            let currentActive = SettingsStore.shared.file.activeID
+            if currentActive == intendedProfileID {
+                mergeNonLighting(from: committed)
+                if lightChanged {
+                    SettingsStore.shared.updateActive { $0.lighting.effect = committed.lighting.effect }
+                    status.settings.lighting.effect = committed.lighting.effect
+                }
+                if brightChanged {
+                    SettingsStore.shared.updateActive { $0.lighting.brightness = committed.lighting.brightness }
+                    status.settings.lighting.brightness = committed.lighting.brightness
+                }
+            } else {
+                Log.info("apply: activeID moved mid-flight (\(intendedProfileID) → \(currentActive)); skipping disk write, mouse now on new profile via applyActiveProfile")
             }
             mergeLastApplied(from: committed,
                              lightChanged: lightChanged, brightChanged: brightChanged)
@@ -672,6 +802,27 @@ final class DeviceController: ObservableObject {
             mergeLastApplied(from: committed,
                              lightChanged: lightChanged, brightChanged: brightChanged)
             throw CancellationError()
+        } catch DeviceError.noResponse {
+            // HID feature-report round-trip timed out on every retry —
+            // usually because the user was actively moving the mouse
+            // during the write (input HID reports saturated the endpoint
+            // and pushed our feature reports out) rather than a genuine
+            // sleep. Silently stash the payload; the next `markAlive`
+            // (i.e. the next mouse event) retries the apply — no scary
+            // error toast, no user intervention needed.
+            //
+            // Tag with `intendedProfileID` so the wake retry can drop the
+            // payload if activeID has moved on to another profile in the
+            // meantime — otherwise this profile's settings would land on
+            // the currently-active profile's disk row via mergeNonLighting.
+            mergeLastApplied(from: committed,
+                             lightChanged: lightChanged, brightChanged: brightChanged)
+            pendingApply = (id: intendedProfileID, settings: settings)
+            Log.info("apply deferred: HID contention (noResponse); will retry on next wake")
+            // Return normally so the debounced scheduleAutoApply caller
+            // shows "Saved" — the deferred retry will bring hardware
+            // in line without the user noticing.
+            return
         } catch {
             // Do NOT overwrite `status.settings` or disk here. `lastApplied`
             // still tracks whatever partially reached the mouse so a retry
@@ -748,8 +899,37 @@ final class DeviceController: ObservableObject {
         hotplug.onChange = { [weak self] kind in
             guard let self else { return }
             Log.info("hotplug → \(kind.rawValue)")
+            let previousKind = self.status.connection
             self.status.connection = kind
             self.status.present = (kind != .none)
+            // A transport change can mean a different physical link (or a
+            // mouse that was just used on another host). Re-verify the
+            // device-mode latch on the next probe.
+            if kind != previousKind { self.checkedDeviceMode = false }
+            // Surface every transport change as a HUD — but for the
+            // "connected" states (dongle / bluetooth) the transport
+            // enumerating doesn't guarantee the mouse is actually
+            // behind it. Razer's dongle firmware in particular keeps
+            // its HID interface up even when the mouse is powered off,
+            // so a bare hotplug event over `.dongle` regularly means
+            // "dongle is plugged in and *may* have a mouse behind it
+            // eventually" — not "your mouse is connected". Firing a
+            // "Connected" HUD from that path lies to the user when the
+            // mouse is off. Defer the HUD; the next markAlive() wake
+            // edge (real input activity or a successful probe) fires
+            // it once we've heard from the actual mouse.
+            //
+            // `.none` is different: transport truly disappearing is
+            // authoritative, so the "Disconnected" HUD fires right away.
+            if previousKind != kind {
+                switch kind {
+                case .none:
+                    SystemHUD.shared.showConnectionChange(kind: kind)
+                    self.pendingConnectionHUDKind = nil
+                case .dongle, .bluetooth:
+                    self.pendingConnectionHUDKind = kind
+                }
+            }
             switch kind {
             case .dongle:
                 self.status.error = nil
@@ -762,6 +942,13 @@ final class DeviceController: ObservableObject {
                 self.status.awake = false
                 self.status.battery = nil
                 self.batterySmoother.reset()
+                // The first battery read after this transition should
+                // seed the low-battery watcher silently (see
+                // `seedLowBatteryWatcher`). Otherwise a mouse that
+                // drained during a period we weren't observing would
+                // fire a spurious "you just dropped below threshold"
+                // HUD on reconnect.
+                self.needsLowBatterySeed = true
                 // Disk is authoritative once we've done the initial import.
                 // Do NOT clear `syncedFromMouse` — that would let the next
                 // probe silently overwrite the Mac profile with whatever the
@@ -819,6 +1006,11 @@ final class DeviceController: ObservableObject {
                 // Don't reset battery smoothing — the same window still
                 // makes sense over BT (AA voltage recovery is a property
                 // of the cell, not the transport).
+                // Same silent-seed rationale as the .dongle branch: the
+                // first BT battery read after (re)pair could be lower
+                // than what we last saw, but the drop didn't happen
+                // just now.
+                self.needsLowBatterySeed = true
                 // Immediate first read: pump handles the recurring 30 s
                 // cadence, but the user shouldn't have to wait a full
                 // interval to see the pill light up on hotplug.
@@ -851,6 +1043,13 @@ final class DeviceController: ObservableObject {
                 // replaced battery reads fresh instead of being clamped to
                 // the previous minimum + upward-step cap.
                 self.batterySmoother.reset()
+                // We've lost the reading — clear watcher latches so a
+                // reconnect starts from a clean slate. The next reading
+                // will be seeded via `needsLowBatterySeed` (set on the
+                // .dongle / .bluetooth branches above).
+                self.lowBatteryWatcher.resetLatches()
+                self.lastDimmedBrightness = nil
+                self.needsLowBatterySeed = true
                 // Mouse is unreachable — cached RAM anchor is meaningless.
                 self.lastRAMLighting = nil
                 // Pump keeps running (it self-idles when connection == .none)
@@ -889,8 +1088,12 @@ final class DeviceController: ObservableObject {
                 // Pick up hardware-initiated DPI changes (physical DPI
                 // cycle button on the mouse) without needing the user to
                 // hit Refresh. Throttled — one read every stageReadTTL of
-                // active use.
-                if now.timeIntervalSince(self.lastStageReadAt) > self.stageReadTTL {
+                // active use, plus a `reconcileFailureCooldown` backoff
+                // if the vendor endpoint just went silent so we don't
+                // burn ~2–3 s of HID retry traffic per input event during
+                // a half-sleep window.
+                if now.timeIntervalSince(self.lastStageReadAt) > self.stageReadTTL
+                   && now.timeIntervalSince(self.lastReconcileFailedAt) > self.reconcileFailureCooldown {
                     Task { await self.reconcileActiveStage() }
                 }
             case .bluetooth:
@@ -986,6 +1189,9 @@ final class DeviceController: ObservableObject {
         // since the snapshot; otherwise the user (or apply()) is the
         // source of truth and reconcile is stale by definition.
         let intendedActive = status.settings.dpi.activeStage
+        // Also snapshot the active profile so a mid-flight profile switch
+        // can't steer this reconcile write into the wrong profile.
+        let intendedProfileID = SettingsStore.shared.file.activeID
         do {
             let hw = try await service.dpiStages(profile: .short)
             lastStageReadAt = Date()
@@ -994,18 +1200,61 @@ final class DeviceController: ObservableObject {
                 Log.info("reconcile: skipping stale read (user changed stage while awaiting)")
                 return
             }
-            let active = max(1, hw.active)
+            guard SettingsStore.shared.file.activeID == intendedProfileID else {
+                Log.info("reconcile: skipping — activeID moved mid-flight (\(intendedProfileID) → \(SettingsStore.shared.file.activeID))")
+                return
+            }
+            // Clamp against the stage list we're about to index into, not
+            // just the lower bound. `hw.active` is whatever byte the mouse
+            // handed back (0–255); a stale-cached response or a mouse whose
+            // onboard profile has more stages than this profile does would
+            // otherwise put an out-of-range `activeStage` on disk. The HUD
+            // below is guarded by `indices.contains`, so the bad value used
+            // to land silently and only get corrected on the next launch
+            // (AppSettings' decoder re-clamps). Matches the clamp
+            // `syncFromHardware` already applies to the same field.
+            let stageCount = status.settings.dpi.stages.count
+            guard stageCount > 0 else { return }
+            let active = max(1, min(stageCount, hw.active))
+            // Successful read — clear any stale failure timestamp so the
+            // next reconcile isn't held up by an old backoff window.
+            lastReconcileFailedAt = .distantPast
             if intendedActive != active {
                 Log.info("mouse-initiated DPI cycle → stage \(active)")
-                var s = status.settings
-                s.dpi.activeStage = active
-                SettingsStore.shared.updateActive { $0 = s }
-                status.settings = s
+                // Targeted writes, NOT a full-snapshot replace. Assigning a
+                // whole pre-await `AppSettings` copy to disk / status would
+                // clobber anything `applyLighting`'s fast path committed while
+                // we were suspended on the HID read — the same hazard
+                // `apply()` and `mergeNonLighting` document at length. This
+                // reconcile owns exactly one field, so it writes exactly one.
+                SettingsStore.shared.updateActive { $0.dpi.activeStage = active }
+                status.settings.dpi.activeStage = active
+                // Also advance `lastApplied.dpi.activeStage` — otherwise the
+                // debounced draft-apply chain that fires from status.settings
+                // publishing computes `dpiChanged = true` and re-writes the
+                // stages block to the mouse, one wasted HID round-trip per
+                // physical DPI-cycle press. Matches how setActiveStage()
+                // updates lastApplied for the UI-click path.
+                lastApplied?.dpi.activeStage = active
+                // Only surface the HUD here — user-initiated stage changes
+                // (badge click in the UI, profile switch) already have their
+                // own visible feedback, so we don't double-announce.
+                let stages = status.settings.dpi.stages
+                let idx = active - 1
+                if stages.indices.contains(idx) {
+                    SystemHUD.shared.showDPIStage(stage: active,
+                                                  total: stages.count,
+                                                  dpi: stages[idx])
+                }
             }
         } catch {
-            // Silent — regular probes will surface real errors. lastStageReadAt
-            // was already advanced pre-await so a failing read still delays
-            // the next attempt by stageReadTTL / foregroundReconcileInterval.
+            // Stamp the failure so both entry points (pump + input-activity)
+            // back off for `reconcileFailureCooldown`. Without this a
+            // half-asleep mouse (HID input still arriving, vendor endpoint
+            // silent) fills the log with `transact noResponse cls=0x4
+            // id=0x86` every ~0.7 s during input. Regular probes still
+            // surface real errors — this path stays silent as before.
+            lastReconcileFailedAt = Date()
         }
     }
 
@@ -1062,7 +1311,8 @@ final class DeviceController: ObservableObject {
             // stamps `lastStageReadAt` at the *start* of the read so a slow
             // HID answer doesn't queue a second read on top.
             if panelVisible && !applyInFlight && !reconcileInFlight
-               && now.timeIntervalSince(lastStageReadAt) >= stageReconcileTTL {
+               && now.timeIntervalSince(lastStageReadAt) >= stageReconcileTTL
+               && now.timeIntervalSince(lastReconcileFailedAt) >= reconcileFailureCooldown {
                 Task { await self.reconcileActiveStage() }
             }
             // Background keep-alive probe. Skips while the mouse is being
@@ -1144,6 +1394,73 @@ final class DeviceController: ObservableObject {
         let waking = !status.awake
         if waking { status.awake = true }
         armAwakeDecay()
+        // Wake-edge HUD: mouse just came back from either an idle-timer
+        // sleep or a physical power-off. From the app's POV both look
+        // like "asleep → awake" — user asked for a visible confirmation
+        // in either case. Uses the current connection kind so the label
+        // matches what the tray already shows ("Connected" / "Bluetooth").
+        //
+        // Also consumes any deferred hotplug HUD parked by wireHotplug:
+        // a bare dongle-plug over an off mouse isn't "connected" until
+        // we've heard the mouse itself. Firing here (on real activity)
+        // is the honest signal.
+        if waking && status.present {
+            SystemHUD.shared.showConnectionChange(kind: status.connection)
+            pendingConnectionHUDKind = nil
+        } else if let pending = pendingConnectionHUDKind, pending == status.connection {
+            // Non-wake activity while a deferred HUD is queued still
+            // proves the mouse is present — fire once, then clear so
+            // steady-state input doesn't re-flash.
+            SystemHUD.shared.showConnectionChange(kind: pending)
+            pendingConnectionHUDKind = nil
+        }
+        // Consume a deferred initial-apply request now that the mouse is
+        // reachable. Only fires on the wake transition so a steady stream
+        // of input events during gaming doesn't repeatedly try to apply.
+        if waking && needsInitialApply && status.connection == .dongle {
+            needsInitialApply = false
+            Log.info("wake after initial launch — retrying deferred apply")
+            applyActiveProfile(reason: "wake after initial launch")
+        }
+        // Retry a user-initiated apply that got HID-contention-deferred.
+        // Runs on the wake transition too — steady input activity keeps
+        // the mouse "awake" from our POV, so waiting for a wake edge
+        // ensures we retry with a fresh HID window instead of piling
+        // retries onto the same saturated endpoint.
+        //
+        // Drop the payload silently if the user (or auto-switch) has
+        // since moved to a different profile — the pending payload
+        // belongs to the OLD profile, and running apply() with it would
+        // both push the old profile's DPI/idle to the mouse AND write
+        // its buttons/scroll into the currently-active profile's disk
+        // row via mergeNonLighting. The now-active profile's own apply
+        // has already fired via `applyActiveProfile("profile switch")`
+        // (and, if it also deferred, it will have overwritten
+        // `pendingApply` with its own tagged payload).
+        if waking, let pending = pendingApply, status.connection == .dongle {
+            pendingApply = nil
+            let liveID = SettingsStore.shared.file.activeID
+            if pending.id == liveID {
+                Log.info("wake — retrying deferred user apply")
+                Task { [weak self] in
+                    do { try await self?.apply(pending.settings) }
+                    catch { /* apply() logs / re-defers on its own */ }
+                }
+            } else {
+                Log.info("wake — dropping deferred apply for stale profile \(pending.id.uuidString.prefix(8)) (active=\(liveID.uuidString.prefix(8)))")
+            }
+        }
+        // Kick a stage reconcile off input activity so the physical DPI
+        // cycle button surfaces in the HUD within one poll interval,
+        // regardless of whether the app panel is open. Guarded by the
+        // same `reconcileInFlight` + advanced `lastStageReadAt` pair as
+        // the pump path, so worst case is 1 read per activityStageReconcileTTL.
+        if status.connection == .dongle
+           && !applyInFlight && !reconcileInFlight
+           && Date().timeIntervalSince(lastStageReadAt) >= activityStageReconcileTTL
+           && Date().timeIntervalSince(lastReconcileFailedAt) >= reconcileFailureCooldown {
+            Task { await self.reconcileActiveStage() }
+        }
         return waking
     }
 
@@ -1151,6 +1468,93 @@ final class DeviceController: ObservableObject {
     /// After the first successful sync, the user's edits in the UI become the
     /// source of truth (until Apply writes them back and we re-sync).
     private var syncedFromMouse = false
+
+    /// Whether we've already checked (and if needed repaired) the mouse's
+    /// device-mode latch this connection. Reset on transport change so a
+    /// dongle→BT→dongle round-trip re-verifies.
+    private var checkedDeviceMode = false
+
+    /// Make sure the mouse is in normal/hardware mode.
+    ///
+    /// Synapse flips the mouse into *driver mode* (0x03) when it takes
+    /// ownership, and the latch is stored on the device — so a mouse last
+    /// used with Synapse on Windows shows up here still in driver mode. In
+    /// that state the mouse stops emitting standard HID reports for the side
+    /// buttons and ships their state over the vendor interface instead,
+    /// waiting for a driver that isn't running. macOS therefore generates no
+    /// event at all, so our CGEventTap has nothing to intercept: buttons 4
+    /// and 5 are silently dead while left/right/wheel keep working (those
+    /// ride the boot-protocol path). Re-pairing and rebooting don't help,
+    /// because the latch isn't on the host.
+    ///
+    /// Reading is free; we only write when the mode is actually wrong, and
+    /// the write is the same one OpenRazer issues on every device init.
+    private func ensureNormalDeviceMode(profile: RetryProfile) async {
+        guard !checkedDeviceMode else { return }
+        let raw: UInt8
+        do {
+            raw = try await service.deviceModeRaw(profile: profile)
+        } catch {
+            // Don't latch on failure — retry on the next probe. A sleeping
+            // mouse shouldn't permanently skip the check.
+            Log.debug(.hid, "device mode: read failed (\(error)) — will retry next probe")
+            return
+        }
+        checkedDeviceMode = true
+        guard let mode = Razer.DeviceMode(rawValue: raw) else {
+            Log.warn("device mode: unrecognized value 0x\(String(raw, radix: 16)) — leaving alone")
+            return
+        }
+        guard mode != .normal else {
+            Log.info(.hid, "device mode: \(mode.label) — side buttons will emit standard HID")
+            return
+        }
+        // driver / factory-test → repair.
+        Log.warn("device mode: mouse is in \(mode.label) mode (0x\(String(raw, radix: 16))) — buttons 4/5 emit no macOS event in this state. Resetting to normal.")
+        do {
+            try await service.setDeviceMode(.normal, profile: profile)
+            let after = try await service.deviceModeRaw(profile: profile)
+            if after == Razer.DeviceMode.normal.rawValue {
+                Log.info(.hid, "device mode: reset to normal — buttons 4/5 should work now")
+                Task { @MainActor in
+                    SystemHUD.shared.showActionError(
+                        String(localized: "Mouse was left in Synapse driver mode — reset to normal. Buttons 4/5 work again."))
+                }
+            } else {
+                Log.warn("device mode: reset did not stick (still 0x\(String(after, radix: 16)))")
+                checkedDeviceMode = false
+            }
+        } catch {
+            Log.warn("device mode: reset failed (\(error))")
+            checkedDeviceMode = false
+        }
+    }
+    /// Set true when we want to push disk state onto the mouse but the
+    /// device is asleep or otherwise unreachable at the moment. `markAlive`
+    /// consumes this on the next wake so any deferred applyActiveProfile
+    /// gets a chance to run once HID transactions can actually complete.
+    private var needsInitialApply = false
+    /// Payload of a user-initiated apply that couldn't complete because
+    /// the mouse's HID endpoint was saturated (input reports pushed our
+    /// feature reports out). `markAlive` retries with this on the next
+    /// wake so the user doesn't have to nudge the app manually.
+    ///
+    /// Tagged with the profile UUID the payload was captured under so a
+    /// wake retry that lands after the user (or auto-switch) moved to a
+    /// different profile doesn't silently commit the old profile's
+    /// buttons/scroll/dpi into whatever profile is active now. That was
+    /// the "macOS profile got overwritten by Minecraft's settings
+    /// overnight" bug — Minecraft's deferred apply retried while macOS
+    /// was live and `mergeNonLighting` wrote Minecraft's values into
+    /// macOS on disk.
+    private var pendingApply: (id: UUID, settings: AppSettings)? = nil
+    /// Connection HUD deferred from wireHotplug. Set when the transport
+    /// starts enumerating (dongle plug-in, BT pairing) but we haven't
+    /// verified the mouse is actually behind it yet. `markAlive`
+    /// consumes this on the first real mouse signal so the "Connected"
+    /// HUD only fires once we know the mouse itself is there — a bare
+    /// dongle-with-off-mouse is not "connected" from the user's POV.
+    private var pendingConnectionHUDKind: ConnectionKind? = nil
 
     // MARK: - Bluetooth battery
 
@@ -1193,7 +1597,24 @@ final class DeviceController: ObservableObject {
         // launch. Escalate to .full (~5 s ceiling) on the very first
         // read so we ride out the nap and populate the UI.
         let profile: RetryProfile = (status.firmware == nil) ? .full : requestedProfile
-        Log.info("probe: begin (profile=\(profile.attempts) attempts, requested=\(requestedProfile.attempts))")
+        // Will this probe actually touch the radio? Each read below is behind
+        // its own guard, so a probe that arrives while everything is still
+        // fresh does no HID work at all — it just emits begin/done. At the
+        // 5 s `dongleKeepaliveTTL` against a 45 s `batteryTTL`, roughly two
+        // thirds of all probes are exactly that: in one 31-minute sample, 115
+        // probes produced only 40 battery reads, and the begin/done pairs were
+        // 12% of the whole log. That crowds out genuinely useful history
+        // inside the 1 MB rotation budget, so a no-op probe logs at `.debug`
+        // and stays out of the file unless someone is actually debugging.
+        let willReadBattery = status.battery == nil
+            || Date().timeIntervalSince(lastBatteryReadAt) > batteryTTL
+        let doesWork = status.firmware == nil || status.serial == nil
+            || willReadBattery || !checkedDeviceMode || !syncedFromMouse
+        if doesWork {
+            Log.info("probe: begin (profile=\(profile.attempts) attempts, requested=\(requestedProfile.attempts))")
+        } else {
+            Log.debug(.hid, "probe: begin (no-op — nothing stale)")
+        }
         do {
             if status.firmware == nil {
                 let fw = try await service.firmware(profile: profile).string
@@ -1210,6 +1631,11 @@ final class DeviceController: ObservableObject {
                 setSmoothedBattery(pct)
                 lastBatteryReadAt = Date()
             }
+            // Verify the device-mode latch before anything else reads state.
+            // A mouse still in Synapse's driver mode has dead side buttons
+            // until this resets it, and the user has no way to discover that
+            // on their own.
+            await ensureNormalDeviceMode(profile: profile)
             // First successful probe: pull the mouse's actual onboard state
             // into the UI so users see their real settings, not our defaults.
             if !syncedFromMouse {
@@ -1221,7 +1647,13 @@ final class DeviceController: ObservableObject {
             // reachable, so we don't need to space out follow-up requests.
             lastProbeFailedAt = .distantPast
             markAlive()
-            Log.info("probe: done (battery=\(status.battery.map { "\($0)%" } ?? "nil"))")
+            // Same info/debug split as `begin` above — keep the pair together
+            // so the log never shows a lone half of a probe.
+            if doesWork {
+                Log.info("probe: done (battery=\(status.battery.map { "\($0)%" } ?? "nil"))")
+            } else {
+                Log.debug(.hid, "probe: done (no-op)")
+            }
         } catch let e as DeviceError {
             handleProbeError(e, profile: profile)
         } catch {
@@ -1249,6 +1681,13 @@ final class DeviceController: ObservableObject {
             Log.info("syncFromHardware: skipping — user edit in flight")
             return
         }
+        // Snapshot the active profile so a mid-flight profile switch can't
+        // steer the imported hardware state into the wrong profile. When
+        // the user switches profiles, applyActiveProfile immediately pushes
+        // the new profile to the mouse — importing what the mouse held
+        // moments ago (the old profile) into the new profile would then
+        // overwrite the new one with the old.
+        let intendedProfileID = SettingsStore.shared.file.activeID
         do {
             let hwStages = try await service.dpiStages(profile: profile)
             let hwPoll   = try await service.pollRate(profile: profile)
@@ -1259,6 +1698,10 @@ final class DeviceController: ObservableObject {
             // would still land right on top of that edit.
             guard autoApplyTask == nil, !applyInFlight else {
                 Log.info("syncFromHardware: skipping commit — user began editing during read")
+                return
+            }
+            guard SettingsStore.shared.file.activeID == intendedProfileID else {
+                Log.info("syncFromHardware: skipping commit — activeID moved during read")
                 return
             }
 
@@ -1309,29 +1752,33 @@ final class DeviceController: ObservableObject {
         batterySmoother.smooth(pct)
     }
 
-    // ─── Low-battery watcher ─────────────────────────────────────────
+    // ─── Low-battery ─────────────────────────────────────────────────
     //
-    // Latch so the notification only fires once per drain cycle. Cleared
-    // when smoothed battery climbs back above `threshold + hysteresis` —
-    // that band prevents a smoothed reading oscillating around the
-    // boundary from firing the notification on every dip. `swapDetected`
-    // inside `smoothBattery` handles the AA-replacement case: the samples
-    // buffer flushes, the display jumps, and the watcher naturally clears
-    // its latch on the next high reading.
-    private var lowBatteryLatched = false
-    /// Percentage at which the most recent low-battery notification
-    /// fired. We only re-notify on genuine drops (`pct < lastNotified`)
-    /// so a smoothed reading that hovers near the threshold doesn't
-    /// spam Notification Center, but a real 20% → 15% → 10% slide
-    /// posts three banners.
-    private var lastNotifiedBatteryPct: Int? = nil
-    /// Cached last brightness written to the mouse RAM while dimming. Lets
-    /// us skip a redundant HID write when the user's committed brightness
-    /// has already been dimmed (or when nothing about the dim state has
-    /// changed) — matters because pollBluetoothBattery + probe fire this
-    /// path every 30-45 s.
+    // Pure state-machine logic (latches, hysteresis, dim threshold cap,
+    // AA-swap rebase) lives in `LowBatteryWatcher` — see
+    // Sources/Monitors/LowBatteryWatcher.swift. This class owns the
+    // watcher instance and translates emitted events into HID writes /
+    // HUD calls, plus the RAM-dedup cache for the dim write.
+
+    private var lowBatteryWatcher = LowBatteryWatcher()
+
+    /// Cached last brightness written to the mouse RAM while dimming.
+    /// Skips a redundant HID write when the watcher re-emits `applyDim`
+    /// with the same target — matters because pollBluetoothBattery
+    /// + probe drive the watcher every 30-45 s. Cleared on the
+    /// `restoreBrightness` event so the next dim engagement always
+    /// writes fresh.
     private var lastDimmedBrightness: Int? = nil
-    private let lowBatteryHysteresis: Int = 10
+
+    /// True when the next `setSmoothedBattery` call should prime the
+    /// watcher silently instead of running it as a live update. Set
+    /// on transport connect (dongle / bluetooth) — the mouse may
+    /// have drained during a period we weren't observing, and the
+    /// first fresh reading shouldn't fire a HUD as if the drop just
+    /// happened. Also set on profile switch when the battery is
+    /// unknown, so the next successful read primes against the new
+    /// profile's threshold.
+    private var needsLowBatterySeed: Bool = true
 
     /// Batched smooth + threshold check. Every caller that would have
     /// written `status.battery = smoothBattery(pct)` routes through here
@@ -1342,45 +1789,86 @@ final class DeviceController: ObservableObject {
             Log.info("battery: \(status.battery.map { "\($0)%" } ?? "nil") → \(display)% (raw=\(raw)%)")
             status.battery = display
         }
-        checkLowBatteryEvent(display)
+        // First reading of a new session (fresh launch, hotplug, or a
+        // profile switch that arrived before we had a battery number):
+        // prime the watcher instead of running a normal update. This
+        // is what prevents a spurious "you crossed the threshold" HUD
+        // from firing on every reconnect / app-focus profile switch
+        // when the battery was ALREADY low — the drop happened while
+        // we weren't watching, not just now.
+        if needsLowBatterySeed {
+            needsLowBatterySeed = false
+            seedLowBatteryWatcher(pct: display)
+        } else {
+            checkLowBatteryEvent(display)
+        }
+    }
+
+    /// Build a fresh `LowBatteryWatcher.Config` from the current
+    /// active-profile settings. Extracted so the seed path and the
+    /// live-update path build config the same way.
+    private func lowBatteryConfig() -> LowBatteryWatcher.Config {
+        LowBatteryWatcher.Config(
+            alertEnabled: status.settings.lowBattery.alertEnabled,
+            dimEnabled: status.settings.lowBattery.dimLEDEnabled,
+            threshold: status.settings.lowBattery.threshold,
+            currentBrightness: status.settings.lighting.brightness
+        )
+    }
+
+    /// Silently prime the watcher's latches to match `pct` under the
+    /// active profile's config. Alert HUD is suppressed; LED dim is
+    /// still executed if the reading warrants it (hardware state
+    /// tracks the profile immediately, only the notification is held).
+    private func seedLowBatteryWatcher(pct: Int) {
+        let cfg = lowBatteryConfig()
+        Log.info("low-battery seed @ \(pct)% (threshold=\(cfg.threshold), dim=\(cfg.dimEnabled))")
+        for event in lowBatteryWatcher.resetAndSeed(pct: pct, config: cfg) {
+            switch event {
+            case .applyDim(let target):
+                Log.info("low-battery LED dim engaged (seed) → target=\(target)% (RAM)")
+                Task { await self.applyLowBatteryDim(target: target) }
+            case .restoreBrightness:
+                // Seeding into a profile that doesn't want the dim while the
+                // LED is currently held dim. Must be honoured, not dropped:
+                // the dim write is RAM-scoped and doesn't move `lastApplied`,
+                // so `apply()` computes `brightChanged == false` whenever the
+                // two profiles share a brightness value and would leave the
+                // LED half-dark indefinitely.
+                Log.info("low-battery LED dim not wanted by seeded profile — restoring brightness")
+                lastDimmedBrightness = nil
+                Task { await self.restoreLightingAfterLowBattery() }
+            case .showHUD:
+                // resetAndSeed deliberately never fires the alert HUD — the
+                // reading didn't drop, the threshold under it moved.
+                break
+            }
+        }
     }
 
     private func checkLowBatteryEvent(_ pct: Int) {
-        let cfg = status.settings.lowBattery
-        let threshold = max(1, min(100, cfg.threshold))
-        let clearAt = min(100, threshold + lowBatteryHysteresis)
-        if pct <= threshold {
-            // Fire on the initial crossing, then again on every further
-            // drop below the last-notified level. Hysteresis / recovery
-            // still lives on `lowBatteryLatched` so LED dim fires once
-            // and clears once — only the notification cadence changed.
-            let firstCross = !lowBatteryLatched
-            let dropped   = lastNotifiedBatteryPct.map { pct < $0 } ?? true
-            if cfg.alertEnabled && (firstCross || dropped) {
-                postLowBatteryNotification(pct)
-                lastNotifiedBatteryPct = pct
+        let cfg = lowBatteryConfig()
+        for event in lowBatteryWatcher.update(pct: pct, config: cfg) {
+            switch event {
+            case .showHUD(let p):
+                Log.info("low-battery HUD at \(p)% (threshold=\(cfg.threshold))")
+                SystemHUD.shared.showBatteryPercent(p)
+            case .applyDim(let target):
+                Log.info("low-battery LED dim engaged → target=\(target)% (RAM)")
+                Task { await self.applyLowBatteryDim(target: target) }
+            case .restoreBrightness:
+                Log.info("low-battery LED dim cleared — restoring brightness")
+                lastDimmedBrightness = nil
+                Task { await self.restoreLightingAfterLowBattery() }
             }
-            if firstCross {
-                lowBatteryLatched = true
-                if cfg.dimLEDEnabled { Task { await self.applyLowBatteryDim() } }
-                Log.info("low-battery threshold crossed at \(pct)% (threshold=\(threshold))")
-            } else if dropped {
-                Log.info("low-battery further drop at \(pct)% — re-notified")
-            }
-        } else if lowBatteryLatched && pct >= clearAt {
-            lowBatteryLatched = false
-            lastNotifiedBatteryPct = nil
-            lastDimmedBrightness = nil
-            if cfg.dimLEDEnabled { Task { await self.restoreLightingAfterLowBattery() } }
-            Log.info("low-battery cleared at \(pct)% (clear=\(clearAt))")
         }
     }
 
     /// Cut brightness in half via a RAM write — no flash, safe on repeat.
-    /// If lighting is already off, do nothing (halving 0 is still 0).
-    private func applyLowBatteryDim() async {
+    /// `target` is computed by the watcher at decision time so mid-Task
+    /// brightness changes don't get folded into the dim math.
+    private func applyLowBatteryDim(target: Int) async {
         guard status.connection == .dongle else { return }
-        let target = max(0, status.settings.lighting.brightness / 2)
         if lastDimmedBrightness == target { return }
         do {
             try await service.setBrightnessPercent(target, storage: .ram)
@@ -1402,92 +1890,6 @@ final class DeviceController: ObservableObject {
             Log.info("low-battery cleared: restored LED to \(target)% (RAM)")
         } catch {
             Log.warn("low-battery: restore write failed: \(error)")
-        }
-    }
-
-    /// Ask for Notifications permission at launch. Ad-hoc / self-signed
-    /// bundles can silently fail the lazy path (macOS refuses to prompt
-    /// for a bundle it doesn't recognize), and the user is then stuck
-    /// wondering why they never got asked. Doing it eagerly at launch
-    /// forces the outcome — grant, deny, or silent-fail — into the log
-    /// on the very first run so it can be diagnosed.
-    private func requestNotificationAuthorizationOnLaunch() {
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            Log.info("notifications: current status = \(Self.authName(settings.authorizationStatus))")
-            switch settings.authorizationStatus {
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, err in
-                    if let err {
-                        Log.warn("notifications: requestAuthorization error: \(err)")
-                    }
-                    Log.info("notifications: requestAuthorization → granted=\(granted)")
-                }
-            case .denied:
-                Log.info("notifications: user has declined — low-battery banners will be suppressed. Enable in System Settings → Notifications → BSK V3 X HS.")
-            case .authorized, .provisional, .ephemeral:
-                break
-            @unknown default:
-                break
-            }
-        }
-    }
-
-    nonisolated private static func authName(_ s: UNAuthorizationStatus) -> String {
-        switch s {
-        case .notDetermined: return "notDetermined"
-        case .denied:        return "denied"
-        case .authorized:    return "authorized"
-        case .provisional:   return "provisional"
-        case .ephemeral:     return "ephemeral"
-        @unknown default:    return "?"
-        }
-    }
-
-    private func postLowBatteryNotification(_ pct: Int) {
-        let center = UNUserNotificationCenter.current()
-        // Auth is normally requested on launch (see
-        // requestNotificationAuthorizationOnLaunch). Re-check here in
-        // case the user changed the toggle in System Settings after
-        // launch, or the launch-time request was still notDetermined
-        // by the time the first low-battery event fired.
-        center.getNotificationSettings { settings in
-            let content = UNMutableNotificationContent()
-            content.title = String(localized: "BSK V3 X HS")
-            // Format string with %% escape so the literal % lands as-is
-            // in the rendered body regardless of locale.
-            let bodyFormat = NSLocalizedString(
-                "Battery at %lld%% — replace the AA soon.",
-                comment: "low-battery notification body"
-            )
-            content.body = String(format: bodyFormat, pct)
-            content.sound = .default
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
-                let req = UNNotificationRequest(
-                    identifier: "bskv3xhs.lowBattery",
-                    content: content, trigger: nil
-                )
-                center.add(req) { err in
-                    if let err { Log.warn("low-battery notification add failed: \(err)") }
-                }
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, err in
-                    if let err { Log.warn("notification auth error: \(err)") }
-                    guard granted else { return }
-                    let req = UNNotificationRequest(
-                        identifier: "bskv3xhs.lowBattery",
-                        content: content, trigger: nil
-                    )
-                    center.add(req) { err in
-                        if let err { Log.warn("low-battery notification add failed: \(err)") }
-                    }
-                }
-            case .denied:
-                Log.info("low-battery notification suppressed — user has declined Notifications for this app")
-            @unknown default:
-                break
-            }
         }
     }
 

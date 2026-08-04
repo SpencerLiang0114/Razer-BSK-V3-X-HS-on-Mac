@@ -59,7 +59,21 @@ struct BatterySmoother {
         // cap for this reading — otherwise a 25% → 95% swap would clip
         // to +3pp per read and take ~15 min for the pill to reflect
         // the new AA, defeating the detection entirely.
-        let currentMin = samples.map(\.pct).min() ?? pct
+        // Baseline for swap detection. Falling back to `lastDisplayed` when
+        // the sample buffer is empty is load-bearing: `?? pct` made
+        // `swapDetected` compare `pct >= pct + swapJump`, i.e. always false.
+        // That silently disabled swap detection on exactly the path
+        // `clearSamplesPreservingAnchor` creates (system wake) — where the
+        // buffer is empty but `lastDisplayed` still constrains the upward
+        // step. Net effect: swap the AA while the Mac is asleep and the pill
+        // crawled +maxUpwardStep per read, taking ~24 reads (~18 min at the
+        // 45 s battery TTL) to reach the real level, while the same swap
+        // without an intervening sleep was detected instantly.
+        //
+        // `?? pct` remains the final fallback for a genuinely fresh smoother
+        // (no samples AND no anchor, e.g. after `reset()`), where the first
+        // reading has nothing to be a swap relative to.
+        let currentMin = samples.map(\.pct).min() ?? lastDisplayed ?? pct
         let swapDetected = pct >= currentMin + swapJump
         if swapDetected {
             samples.removeAll()

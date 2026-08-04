@@ -252,7 +252,16 @@ final class ButtonMap: ObservableObject {
         accessibilityTrusted = now
         // Whenever trust flips, re-evaluate the tap: on grant, install if the
         // current mappings need it; on revoke, tear the old (now-dead) one down.
-        if changed { reconfigureTap() }
+        if changed {
+            // A trust flip means the tap is going to be torn down and
+            // possibly rebuilt — same reasoning as `apply()`: any
+            // suppression tracking, held modifier, or turbo timer from
+            // the pre-flip tap is stale under the new one. Start clean.
+            stopAllTurbo()
+            suppressedButtons.removeAll()
+            releaseAllHeldModifiers()
+            reconfigureTap()
+        }
         // Trust is one-way in practice — once granted for this bundle, macOS
         // does not silently revoke. Kill the poll to stop the every-2-s XPC.
         // If the user revokes via System Settings and toggles it back later,
@@ -278,9 +287,41 @@ final class ButtonMap: ObservableObject {
         if !accessibilityTrusted { armTrustTimer() }
     }
 
+    /// Apply a button map AND the scroll settings in one shot, rebuilding the
+    /// tap exactly once.
+    ///
+    /// The three callers in DeviceController (`start`, `applyActiveProfile`,
+    /// `apply`) all used to do `apply(buttons)` → `ScrollTransformer.settings
+    /// = scroll` → `scrollSettingsChanged()`, and since both `apply` and
+    /// `scrollSettingsChanged` end in `reconfigureTap()`, every one of those
+    /// sites tore down and rebuilt the tap twice. A CGEventTap's mask is fixed
+    /// at creation, so a "reconfigure" is a real uninstall + `tapCreate` +
+    /// `CFRunLoopAddSource` round trip, and the window between them is time
+    /// with no tap installed at all — i.e. dropped remaps. Batching also means
+    /// the intermediate state (new buttons, old scroll settings) never gets a
+    /// mask computed for it.
+    func applyProfile(buttons: ButtonMappings, scroll: ScrollSettings) {
+        applyMappings(buttons)
+        ScrollTransformer.shared.settings = scroll
+        reconfigureTap()
+    }
+
     func apply(_ new: ButtonMappings) {
+        applyMappings(new)
+        // Rebuilds the tap with the minimum event mask the new mappings need;
+        // if nothing is remapped, tears the tap down entirely.
+        reconfigureTap()
+    }
+
+    /// Everything `apply` does except the tap rebuild, so `applyProfile` can
+    /// coalesce its own rebuild with the scroll-settings change.
+    private func applyMappings(_ new: ButtonMappings) {
         mappings = new
-        Log.info("button map applied — left=\(new.leftClick.label) right=\(new.rightClick.label) mid=\(new.scrollClick.label) btn4=\(new.mouseButton4.label) btn5=\(new.mouseButton5.label) scrollUp=\(new.scrollUp.label) scrollDown=\(new.scrollDown.label)")
+        // Full mapping snapshot — useful when debugging "why doesn't
+        // this button do what I set it to", but noisy in the steady-
+        // state log (fires on every profile switch and every slider
+        // debounce). Debug-only.
+        Log.debug(.button, "map applied — left=\(new.leftClick.label) right=\(new.rightClick.label) mid=\(new.scrollClick.label) btn4=\(new.mouseButton4.label) btn5=\(new.mouseButton5.label) scrollUp=\(new.scrollUp.label) scrollDown=\(new.scrollDown.label)")
         // In-flight Turbo timers captured the OLD action at button-down time.
         // If the user changed the mapping (or the tap mask shrinks below the
         // button's UP events), the timer would keep firing the stale action
@@ -291,17 +332,24 @@ final class ButtonMap: ObservableObject {
         // tap may not include the up-mask for a button that's still held, so
         // its release event might never reach us. Start clean.
         suppressedButtons.removeAll()
-        // Rebuilds the tap with the minimum event mask the new mappings need;
-        // if nothing is remapped, tears the tap down entirely.
-        reconfigureTap()
+        // If the user swapped a `.modifier(...)` mapping for something
+        // else while still physically holding the button, we'll never
+        // fire the matching keyUp path through the tap — release now
+        // so the modifier doesn't stay stuck down after the swap.
+        releaseAllHeldModifiers()
+        // NOTE: no reconfigureTap() here — the caller owns that, so
+        // `applyProfile` can fold it in with the scroll-settings change.
     }
 
-    /// The scroll transformer runs through this tap too. When the user
-    /// toggles scroll on/off we need to expand or shrink the event mask so
-    /// scrollWheel events either reach us or bypass us entirely.
-    func scrollSettingsChanged() {
-        reconfigureTap()
-    }
+    // (There used to be a `scrollSettingsChanged()` here that just called
+    // `reconfigureTap()`. Every scroll edit now arrives through
+    // `applyProfile(buttons:scroll:)` — the scroll pane's draft goes
+    // MainView.scheduleAutoApply → DeviceController.apply → applyProfile —
+    // so a separate entry point only existed to be paired with a second,
+    // redundant tap rebuild. Removed rather than left dead: the scroll
+    // transformer's `enabled` flag feeds `neededEventTypes()`, so anything
+    // that changes it must go through applyProfile to get a mask that
+    // matches.)
 
     // ─── Tap install ─────────────────────────────────────────────────
 
@@ -375,12 +423,37 @@ final class ButtonMap: ObservableObject {
         // otherwise typing anywhere would wake this app on every keystroke.
         if !mappings.triggers.isEmpty {
             types.insert(.keyDown)
+            // A firmware-remapped button set to a BARE MODIFIER (Synapse's
+            // "Hold Ctrl" etc.) never produces keyDown at all — macOS reports
+            // modifier-only presses as flagsChanged. Without this the trigger
+            // for such a button could never fire, which is a silent dead end
+            // for the exact case KeyTrigger exists to handle.
+            if mappings.triggers.values.contains(where: { Self.isModifierKeyCode($0.keyCode) }) {
+                types.insert(.flagsChanged)
+            }
         }
         // Scroll transform also lives on this tap. When it's on we need
         // scrollWheel events even if no scrollUp/scrollDown button remap
         // is set.
         if ScrollTransformer.shared.settings.enabled {
             types.insert(.scrollWheel)
+        }
+        // Debug aid: with logging on, also watch flagsChanged / keyDown so the
+        // log can show what a firmware-remapped modifier button actually
+        // reports.
+        //
+        // Deliberately gated on `!types.isEmpty` — i.e. debug only *widens* a
+        // tap we were already installing, it never brings one into existence.
+        // Unconditionally inserting these made the debug switch a behaviour
+        // switch: with all-passthrough mappings and scroll off, the mask would
+        // otherwise be 0 (no tap at all, macOS never wakes us), but turning on
+        // debug installed a session-wide tap seeing every keystroke on the
+        // machine. That's a privacy cost the user didn't ask for by flipping a
+        // *logging* toggle, an extra tap-callback on every keypress, and the
+        // source of the third redundant tap install at startup.
+        if !types.isEmpty && Log.debugEnabled {
+            types.insert(.flagsChanged)
+            types.insert(.keyDown)
         }
         return types
     }
@@ -407,7 +480,7 @@ final class ButtonMap: ObservableObject {
         CGEvent.tapEnable(tap: tap, enable: true)
         self.runLoopSource = src
         self.currentMask = mask
-        Log.info("event tap installed mask=0x\(String(mask, radix: 16))")
+        Log.info(.button, "event tap installed mask=0x\(String(mask, radix: 16))")
     }
 
     private func uninstallTap() {
@@ -422,7 +495,7 @@ final class ButtonMap: ObservableObject {
             // until the last source retain drains.
             CFMachPortInvalidate(existing)
             self.tap = nil
-            Log.info("event tap uninstalled")
+            Log.info(.button, "event tap uninstalled")
         }
         self.currentMask = 0
     }
@@ -439,7 +512,19 @@ final class ButtonMap: ObservableObject {
         case (.otherMouseDown, 2), (.otherMouseUp, 2): return (.scrollClick,  isDown)
         case (.otherMouseDown, 3), (.otherMouseUp, 3): return (.mouseButton4, isDown)
         case (.otherMouseDown, 4), (.otherMouseUp, 4): return (.mouseButton5, isDown)
-        default: return nil
+        default:
+            // An `otherMouse*` event we have no mapping slot for. This used
+            // to return nil silently, which made the single most common
+            // support question — "I set button 4 and nothing happens" —
+            // undiagnosable: the log looked *identical* whether the mouse
+            // sent a button number we don't handle (5, 6, …, e.g. after a
+            // Synapse remap) or sent nothing at all. Log the raw number on
+            // down so the log distinguishes the two. Debug-only; a stray
+            // 5-button mouse would otherwise spam this on every click.
+            if type == .otherMouseDown {
+                Log.debug(.button, "tap saw UNMAPPED otherMouseDown buttonNumber=\(btn) — no MouseButton slot for it (handled: 2=scrollClick, 3=btn4, 4=btn5)")
+            }
+            return nil
         }
     }
 
@@ -463,11 +548,31 @@ final class ButtonMap: ObservableObject {
         // still held. Best case scenario, the timer would keep auto-firing
         // whatever action was mapped forever, until the user opens the app
         // and changes the mapping.
+        //
+        // Just as critical: any modifier we sent keyDown for (via a
+        // `.modifier(...)` mapping) is still virtually "held" from the
+        // OS's point of view. If we don't release them here they stay
+        // stuck until the app relaunches — user reports Cmd or Option
+        // frozen down across every app on the system. Release them all
+        // and log a warning; the next physical press of the mapped
+        // button starts the modifier lifecycle fresh.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             this.stopAllTurbo()
             // We missed however many up events during the disabled window;
             // don't try to guess which physical buttons are still held.
             this.suppressedButtons.removeAll()
+            // Always record the disable. macOS kills a tap whose callback
+            // ran long (timeout) or on certain user-input sequences, and
+            // until now that left NO trace unless a modifier happened to be
+            // held — so "my buttons randomly stopped working" was
+            // indistinguishable in the log from "the mouse sent nothing".
+            // This is a real symptom with a real cause; it belongs in the
+            // log unconditionally.
+            Log.warn("event tap DISABLED by macOS (\(type == .tapDisabledByTimeout ? "timeout — callback ran too long" : "user input")) — re-enabling; button remaps were dead until now")
+            if !this.heldModifiers.isEmpty {
+                Log.warn("event tap disabled with \(this.heldModifiers.count) held modifier(s) — releasing to avoid stuck-key state")
+                this.releaseAllHeldModifiers()
+            }
             if let tap = this.tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -502,11 +607,42 @@ final class ButtonMap: ObservableObject {
         // log the raw keycode/modifiers here: /tmp/bskv3xhs.log is world-
         // readable and we don't want a plaintext record of every keystroke
         // the user makes while a trigger is configured.
+        // Bare-modifier presses (a firmware-remapped "Hold Ctrl" button)
+        // arrive as flagsChanged, never keyDown. Handle them on the press
+        // edge only — flagsChanged fires for both down and up, and the only
+        // way to tell them apart is whether the modifier's bit is now set.
+        if type == .flagsChanged {
+            let kc = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            let flags = event.flags
+            let isDown = ButtonMap.modifierBitIsSet(keyCode: kc, in: flags)
+            // Diagnostic: modifier keycodes only — never a printable key, so
+            // this cannot become a record of what the user typed.
+            Log.debug(.button, "flagsChanged keyCode=0x\(String(kc, radix: 16)) \(isDown ? "DOWN" : "up") flags=0x\(String(flags.rawValue, radix: 16))")
+            if isDown, let (btn, action) = this.matchKeyTrigger(keyCode: kc, flags: flags) {
+                Log.debug(.button, "matched virtual trigger (modifier) for \(btn.rawValue) → \(action.label)")
+                if action != .passthrough {
+                    this.fire(action)
+                    return nil
+                }
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
         if type == .keyDown {
             let kc = event.getIntegerValueField(.keyboardEventKeycode)
             let flags = event.flags
+            // Diagnostic for firmware-remap hunting: log ONLY non-printable
+            // keys (function row, arrows, nav cluster). Printable keycodes
+            // are never logged, so this can't accumulate into a transcript of
+            // the user's typing even with debug left on.
+            if Log.debugEnabled, ButtonMap.isDiagnosticSafeKeyCode(UInt16(kc)) {
+                Log.debug(.button, "keyDown keyCode=0x\(String(kc, radix: 16)) flags=0x\(String(flags.rawValue, radix: 16))")
+            }
             if let (btn, action) = this.matchKeyTrigger(keyCode: UInt16(kc), flags: flags) {
-                Log.info("matched virtual trigger for \(btn.rawValue) → \(action.label)")
+                // Per-keystroke match — noisy on any user with a
+                // firmware-remapped side button (fires every press
+                // during gaming). Debug-only.
+                Log.debug(.button, "matched virtual trigger for \(btn.rawValue) → \(action.label)")
                 if action != .passthrough {
                     this.fire(action)
                     return nil
@@ -530,13 +666,15 @@ final class ButtonMap: ObservableObject {
             if let btn = mappedBtn {
                 let action = this.mappings.action(for: btn)
                 if action != .passthrough {
-                    let turbo = this.mappings.turbo(for: btn)
-                    Log.info("tap saw \(btn.rawValue) → action=\(action.label)\(turbo.enabled ? " [turbo \(turbo.rate)Hz]" : "")")
-                    if turbo.enabled {
-                        this.startTurbo(btn: btn, action: action, rate: turbo.rate)
-                    } else {
-                        this.fire(action)
-                    }
+                    // Fires on every wheel tick — very hot. Debug-only.
+                    Log.debug(.scroll, "tap saw \(btn.rawValue) → action=\(action.label)")
+                    // Turbo (rate-fire) is meaningless for scroll actions:
+                    // wheel events are one-shot with no matching "up"
+                    // event, so startTurbo would launch a repeating timer
+                    // with no way to stop it — actions fire forever until
+                    // the mapping changes or the app relaunches. Always
+                    // fire once per wheel tick regardless of the toggle.
+                    this.fire(action)
                     return nil
                 }
             }
@@ -559,7 +697,10 @@ final class ButtonMap: ObservableObject {
         let action = this.mappings.action(for: btn)
         let turbo = this.mappings.turbo(for: btn)
         if isDown {
-            Log.info("tap saw button=\(btn.rawValue) down → action=\(action.label)\(turbo.enabled ? " [turbo \(turbo.rate)Hz]" : "")")
+            // Fires on every button-down that has a non-passthrough
+            // mapping — every mouseback / mouseforward click, every
+            // scroll-click, every right-click. Debug-only.
+            Log.debug(.button, "tap saw button=\(btn.rawValue) down → action=\(action.label)\(turbo.enabled ? " [turbo \(turbo.rate)Hz]" : "")")
         }
         guard action != .passthrough else {
             return Unmanaged.passUnretained(event)
@@ -633,6 +774,19 @@ final class ButtonMap: ObservableObject {
         for b in MouseButton.allCases {
             switch mappings.virtualTrigger(for: b) {
             case .some(let t) where t.keyCode == keyCode && t.matches(flags):
+                // Keycode alone is NOT enough. A CGEventTap sees identical
+                // events whether the key came from the mouse's firmware-
+                // remapped side button or from the user's real keyboard, so
+                // matching on keycode fired the action for both — pressing
+                // Control on the keyboard would switch Spaces. Require that
+                // the mouse itself produced a matching keyboard HID event
+                // within the last few ms (InputActivity knows the source
+                // because its IOHIDManager is bound to this VID/PID).
+                let wantUsage = MouseKeyboardEcho.hidUsage(forKeyCode: keyCode)
+                guard MouseKeyboardEcho.sawRecently(expectedUsage: wantUsage) else {
+                    Log.debug(.button, "trigger keycode matched \(b.rawValue) but no recent HID echo from the mouse — ignoring (real keyboard press)")
+                    return nil
+                }
                 return (b, mappings.action(for: b))
             default: continue
             }
@@ -710,6 +864,17 @@ final class ButtonMap: ObservableObject {
     private func releaseHeldModifier(for btn: MouseButton) {
         guard let mods = heldModifiers.removeValue(forKey: btn.rawValue) else { return }
         postModifierEvents(mods, down: false)
+    }
+
+    /// Release every currently-held modifier and clear the dict. Called
+    /// from the tap-disabled recovery path so a modifier we sent keyDown
+    /// for doesn't stay virtually pressed across the whole OS after we
+    /// lose the ability to see the physical button's up event.
+    private func releaseAllHeldModifiers() {
+        for (_, mods) in heldModifiers {
+            postModifierEvents(mods, down: false)
+        }
+        heldModifiers.removeAll()
     }
 
     /// Post keyDown or keyUp for each modifier bit in `mods`. Uses the
@@ -880,6 +1045,11 @@ final class ButtonMap: ObservableObject {
     /// Terminal — that's a fair price for launching a CLI from a mouse
     /// button. `command` is expected to already be shell-quoted (the CLI
     /// preset resolves the absolute binary path with quotes).
+    ///
+    /// On failure (typically Automation permission denied — errorNumber
+    /// -1743) we surface a HUD toast so the user knows the button click
+    /// didn't disappear into a void. Without this, a denied Automation
+    /// prompt made every future click of that button silently do nothing.
     private func launchInTerminal(command: String) {
         // Escape backslashes and double-quotes so the AppleScript literal
         // survives command paths with spaces / unusual characters.
@@ -893,13 +1063,73 @@ final class ButtonMap: ObservableObject {
         end tell
         """
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let script = NSAppleScript(source: source) else { return }
+            guard let script = NSAppleScript(source: source) else {
+                Log.warn("Terminal launch: failed to build AppleScript for \(command)")
+                Task { @MainActor in
+                    SystemHUD.shared.showActionError(String(localized: "Couldn't launch Terminal"))
+                }
+                return
+            }
             var error: NSDictionary?
             script.executeAndReturnError(&error)
             if let error {
-                Log.warn("Terminal launch failed: \(error)")
+                let num = (error[NSAppleScript.errorNumber] as? Int) ?? 0
+                let msg = (error[NSAppleScript.errorMessage] as? String) ?? "unknown"
+                Log.warn("Terminal launch failed: errorNumber=\(num) message=\(msg)")
+                // -1743 = "Not authorized to send Apple events to Terminal"
+                // — the Automation TCC prompt for Terminal was denied
+                // (or hasn't been shown yet on some macOS builds).
+                let hint: String
+                if num == -1743 {
+                    hint = String(localized: "Terminal automation blocked. Enable it in System Settings → Privacy & Security → Automation.")
+                } else {
+                    hint = String(localized: "Terminal launch failed. See log for details.")
+                }
+                Task { @MainActor in
+                    SystemHUD.shared.showActionError(hint)
+                }
             }
         }
+    }
+
+    /// Whether `keyCode`'s modifier bit is currently set in `flags` — i.e.
+    /// whether this flagsChanged event is a press rather than a release.
+    static func modifierBitIsSet(keyCode: UInt16, in flags: CGEventFlags) -> Bool {
+        switch Int(keyCode) {
+        case kVK_Control, kVK_RightControl: return flags.contains(.maskControl)
+        case kVK_Shift, kVK_RightShift:     return flags.contains(.maskShift)
+        case kVK_Option, kVK_RightOption:   return flags.contains(.maskAlternate)
+        case kVK_Command, kVK_RightCommand: return flags.contains(.maskCommand)
+        case kVK_Function:                  return flags.contains(.maskSecondaryFn)
+        case kVK_CapsLock:                  return flags.contains(.maskAlphaShift)
+        default:                            return false
+        }
+    }
+
+    /// Keycodes safe to write to the log: function row, arrows, and the
+    /// navigation cluster. Deliberately excludes every printable key so
+    /// debug logging can never become a transcript of the user's typing.
+    static func isDiagnosticSafeKeyCode(_ code: UInt16) -> Bool {
+        let ids: Set<Int> = [kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6,
+                             kVK_F7, kVK_F8, kVK_F9, kVK_F10, kVK_F11, kVK_F12,
+                             kVK_F13, kVK_F14, kVK_F15, kVK_F16, kVK_F17,
+                             kVK_F18, kVK_F19, kVK_F20,
+                             kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow,
+                             kVK_PageUp, kVK_PageDown, kVK_Home, kVK_End,
+                             kVK_ForwardDelete, kVK_Escape]
+        return ids.contains(Int(code))
+    }
+
+    /// Virtual keycodes that macOS reports via `flagsChanged` rather than
+    /// `keyDown`. A firmware-remapped button bound to one of these (Synapse's
+    /// "Hold Ctrl" / "Hold Shift" …) is invisible to a keyDown-only tap.
+    static func isModifierKeyCode(_ code: UInt16) -> Bool {
+        let ids: Set<Int> = [kVK_Control, kVK_RightControl,
+                             kVK_Shift, kVK_RightShift,
+                             kVK_Option, kVK_RightOption,
+                             kVK_Command, kVK_RightCommand,
+                             kVK_Function, kVK_CapsLock]
+        return ids.contains(Int(code))
     }
 
     private func isFunctionLayerKey(_ code: UInt16) -> Bool {

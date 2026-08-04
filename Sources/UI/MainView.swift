@@ -75,6 +75,11 @@ struct MainView: View {
     /// reset for a short window after each edit lets the user's edits win.
     @State private var draftLastEdit: Date = .distantPast
     private let draftHoldWindow: TimeInterval = 0.6
+    /// Slider-drag state coordinator — MainView listens so it can defer
+    /// autoApply until every active slider drag has ended (users read
+    /// "still holding the slider" as "don't save yet"). See
+    /// SliderCommitCoordinator for the contract.
+    @ObservedObject private var sliderCoord = SliderCommitCoordinator.shared
 
     enum FooterState {
         case idle, working(String), ok(String), error(String)
@@ -93,10 +98,26 @@ struct MainView: View {
         // gives us a hard predictable top alignment: both columns
         // start at y=0 of the window.
         HStack(spacing: 0) {
+            // Floating-capsule sidebar — Tahoe Finder style. The sidebar
+            // is inset from the window edges with rounded corners and
+            // its own translucent material, so it reads as a distinct
+            // pane hovering over the window's Liquid Glass instead of
+            // fusing with the detail column. `.regularMaterial` auto-
+            // upgrades to Liquid Glass on macOS 26; pre-26 users get the
+            // same translucent look System Settings has always used.
             Sidebar(selection: $selection)
                 .frame(width: 210)
-                .background(VisualEffect(.sidebar, blending: .behindWindow))
-            Divider()
+                .frame(maxHeight: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(.regularMaterial)
+                        .overlay(RoundedRectangle(cornerRadius: 14)
+                            .stroke(DS.border, lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
+                )
+                .padding(.leading, 10)
+                .padding(.vertical, 10)
+                .padding(.trailing, 4)
             VStack(spacing: 0) {
                 DetailHero(section: selection)
                 Divider().opacity(0.3)
@@ -127,14 +148,28 @@ struct MainView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollContentBackground(.hidden)
-                if footer.showsAny {
-                    StatusBar(footer: $footer)
-                        .transition(AnyTransition.move(edge: Edge.bottom).combined(with: AnyTransition.opacity))
-                }
             }
-            .background(Color(nsColor: .windowBackgroundColor))
             .animation(.easeInOut(duration: 0.15), value: footer.showsAny)
         }
+        // Floating status toast — overlays the top-right corner so it
+        // doesn't push detail content up and cause a scroll bar to appear
+        // like the old bottom footer did.
+        .overlay(alignment: .topTrailing) {
+            if footer.showsAny {
+                StatusBar(footer: $footer)
+                    .padding(.top, 12)
+                    .padding(.trailing, 16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        // Single translucent surface for the whole window. Using
+        // `.regularMaterial` rather than `.glassEffect()` here: nested
+        // glassEffect layers (window → sidebar → card) can't share a
+        // GlassEffectContainer, so on macOS 26 the inner ones render
+        // as opaque milky rectangles instead of refracting the layer
+        // beneath. Material stacks cleanly, and macOS 26 auto-lifts
+        // it to Liquid Glass characteristics anyway.
+        .background(.regularMaterial)
         .frame(minWidth: 900, idealWidth: 900, minHeight: 580, idealHeight: 580)
         // Extend content behind the titlebar strip so the visible top of
         // the panel is the sidebar / detail content itself, not an empty
@@ -156,6 +191,20 @@ struct MainView: View {
             let cur = SettingsStore.shared.current
             if cur != draft { draft = cur }
         }
+        // A profile switch (or a fresh "New Profile" that flips activeID)
+        // must always re-seed the draft, even if the user was mid-edit —
+        // otherwise the pre-switch draft rides across the switch, and the
+        // next `draft.onChange` fires an apply() that writes the previous
+        // profile's edits into whichever profile is now active. That was
+        // reproducible as "created a new profile, edited it, went back to
+        // the old one — old one had my new edits too".
+        .onReceive(SettingsStore.shared.$file.map(\.activeID).removeDuplicates().dropFirst()) { _ in
+            let cur = SettingsStore.shared.current
+            if cur != draft { draft = cur }
+            // Clear the edit window too: any pending debounce belongs to
+            // the previous profile and shouldn't gate the new one.
+            draftLastEdit = .distantPast
+        }
         // First-launch-over-BT UX: if we land on a dongle-only pane while
         // the mouse is reachable only via Bluetooth, jump to the first
         // usable pane so users aren't looking at a dimmed disabled screen.
@@ -165,6 +214,10 @@ struct MainView: View {
         .onChange(of: status.connection) { _, _ in autoSelectUsablePane() }
         .onChange(of: draft) { old, next in
             draftLastEdit = Date()
+            // Slider still under the user's finger — mid-drag values are
+            // draft-only for now. The `.onChange(of: sliderCoord.activeDrags)`
+            // handler below fires the commit once the last drag ends.
+            guard sliderCoord.activeDrags == 0 else { return }
             // Lighting-only changes take a fast path — writing DPI/poll/idle
             // alongside a mode/color tweak visibly restarts the mouse's LED
             // effect timer (spectrum/wave stutter) and adds ~1.5s of latency.
@@ -177,6 +230,13 @@ struct MainView: View {
                 }
             }
             scheduleAutoApply(next)
+        }
+        .onChange(of: sliderCoord.activeDrags) { _, count in
+            // Last slider release — commit whatever draft holds now.
+            // Guarded against stray decrements when the count was already
+            // zero so we don't fire an apply on cold start.
+            guard count == 0 else { return }
+            scheduleAutoApply(draft)
         }
     }
 
@@ -349,13 +409,17 @@ private struct Sidebar: View {
             selection = s
         } label: {
             HStack(spacing: 10) {
+                // Icon + text both take `.primary` when unselected so the
+                // row reads as a solid black label on the material,
+                // matching the selected row's solid-white contrast rather
+                // than fading the icon out with `.secondary`.
                 Image(systemName: s.symbol)
                     .font(.system(size: 13, weight: .medium))
                     .frame(width: 20, alignment: .center)
-                    .foregroundStyle(selected ? Color.white : .secondary)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
                 Text(LocalizedStringKey(s.title))
                     .font(.system(size: 13))
-                    .foregroundStyle(selected ? Color.white : .primary)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
@@ -364,9 +428,14 @@ private struct Sidebar: View {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(selected ? Color.accentColor : Color.clear)
             )
+            // Hover wash sits BEHIND the selected fill (background modifiers
+            // stack inside-out), so selected rows still read as accent while
+            // unselected rows pick up a soft primary tint under the pointer.
+            .hoverHighlight(cornerRadius: 7)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .hoverPointer()
     }
 }
 
@@ -517,6 +586,7 @@ private struct RenameSheet: View {
         }
         .padding(20)
         .frame(width: 320)
+        .liquidGlassSheet()
     }
 }
 

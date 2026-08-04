@@ -44,8 +44,15 @@ struct RetryProfile {
     static let full  = RetryProfile(attempts: 40, firstWaitMs: 60, retryWaitMs: 120,
                                     busyBackoffMs: 400, maxConsecutiveBusy: 20)
     /// Background probe — bail out quickly if the mouse isn't answering.
-    static let short = RetryProfile(attempts: 8,  firstWaitMs: 60, retryWaitMs: 150,
-                                    busyBackoffMs: 350, maxConsecutiveBusy: 4)
+    /// Bumped from 8 attempts / 4 busy tolerance after users reported
+    /// "mouse asleep" errors during active use: HID input reports
+    /// saturating the endpoint would eat the first several feature-
+    /// report attempts, and 8 wasn't enough headroom. 20 attempts with
+    /// 10 busy backoff keeps the same wall-clock ceiling for a truly
+    /// asleep mouse (still tens of ms) while surviving normal
+    /// mouse-in-use HID contention.
+    static let short = RetryProfile(attempts: 20, firstWaitMs: 60, retryWaitMs: 150,
+                                    busyBackoffMs: 350, maxConsecutiveBusy: 10)
 }
 
 // ─── HID transport ────────────────────────────────────────────────────
@@ -253,6 +260,19 @@ final class Device: @unchecked Sendable {
         var invalidDestCount = 0
         var lastWasBusy = false
         var consecutiveBusy = 0
+        /// Reset the busy streak. Both `lastWasBusy` (which picks the wait
+        /// budget for the next attempt) and `consecutiveBusy` (which decides
+        /// when to bail early) describe *the previous attempt*, so any
+        /// non-busy outcome has to clear them. Without this they were
+        /// write-once: one busy response early in the loop pinned every
+        /// later attempt to `busyBackoffMs` (350 ms vs 150 ms — up to ~3.8 s
+        /// of dead time on a `.short` probe) and turned `consecutiveBusy`
+        /// into a total count, so a busy/short-read alternation bailed at
+        /// `maxConsecutiveBusy` total busies instead of consecutive ones.
+        func clearBusyStreak() {
+            lastWasBusy = false
+            consecutiveBusy = 0
+        }
         let cls = report[6], cmd = report[7]
         attemptLoop: for attempt in 0..<profile.attempts {
             if cancel.cancelled { throw CancellationError() }
@@ -316,10 +336,14 @@ final class Device: @unchecked Sendable {
             // zero-padded trailing bytes as valid frame content (CRC byte
             // would then read from padding and every response would fail
             // CRC → 40 wasted attempts on any short-response macOS quirk).
-            guard len >= Razer.reportLen else { shortCount += 1; continue }
+            guard len >= Razer.reportLen else {
+                shortCount += 1; clearBusyStreak(); continue
+            }
             let responseBytes = Array(buf.prefix(len))
 
-            guard let parsed = Razer.parse(responseBytes) else { shortCount += 1; continue }
+            guard let parsed = Razer.parse(responseBytes) else {
+                shortCount += 1; clearBusyStreak(); continue
+            }
             // Sometimes macOS's HID stack hands back a stale cached response
             // from a different command — skip anything that doesn't echo our
             // class/id.
@@ -328,6 +352,7 @@ final class Device: @unchecked Sendable {
                     Log.info("transact class mismatch: sent cls=0x\(String(cls, radix: 16)) id=0x\(String(cmd, radix: 16)) but got cls=0x\(String(parsed.cls, radix: 16)) id=0x\(String(parsed.id, radix: 16)) status=0x\(String(parsed.status, radix: 16))")
                 }
                 classMismatchCount += 1
+                clearBusyStreak()
                 continue
             }
             if !parsed.crcOK { badCRCCount += 1 }

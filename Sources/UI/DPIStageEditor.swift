@@ -64,17 +64,7 @@ private struct DPIStageRow: View {
                               scrub: $xScrub)
             }
 
-            Button(action: removeSelf) {
-                Image(systemName: "minus")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 22, height: 22)
-                    .foregroundStyle(.secondary)
-                    .background(Circle().fill(Color.secondary.opacity(0.10)))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canRemove)
-            .opacity(canRemove ? 1 : 0.35)
-            .help("Remove this stage")
+            RemoveStageButton(enabled: canRemove, onRemove: removeSelf)
         }
         .padding(.vertical, 6)
     }
@@ -123,14 +113,26 @@ private struct DPIStageRow: View {
     }
 }
 
-// Numeric readout + native Slider. `scrub` holds the mid-drag value so
+// Numeric editor + native Slider. `scrub` holds the mid-drag value so
 // `value` (which propagates to the HID apply pipeline) only writes on
-// drag end.
+// slider drag end. The numeric field is editable so users who want to
+// jump to an exact DPI (say, 800) don't have to nudge a 358-step
+// slider one 50-pixel increment at a time.
 private struct DPIAxisEditor: View {
     let label: String?
     @Binding var value: Int
     @Binding var scrub: Int?
+    /// Local buffer for the TextField so the user can type freely
+    /// without every keystroke clamping / snapping into `value`
+    /// mid-type (e.g. typing "1600" would otherwise pass through
+    /// intermediate states 1, 16, 160, 1600 — each triggering an
+    /// apply). Committed on return / focus loss / arrow keys via
+    /// `.onSubmit` and `.onChange(of: focused)`.
+    @State private var typing: String = ""
+    @FocusState private var focused: Bool
+
     private var displayed: Int { scrub ?? value }
+
     var body: some View {
         HStack(spacing: 10) {
             if let label {
@@ -139,11 +141,33 @@ private struct DPIAxisEditor: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 12)
             }
-            Text(displayed.formatted())
+            TextField("", text: $typing)
+                .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .trailing)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 56)
+                .focused($focused)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 4)
+                    .fill(focused ? Color(nsColor: .textBackgroundColor) : Color.clear))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(focused ? DS.accentBorderSubtle : Color.clear, lineWidth: 0.5))
+                .onAppear { typing = "\(displayed)" }
+                // Keep the field in sync when the value changes from
+                // outside (slider commit, HID reconcile, profile switch)
+                // — but only while the user isn't actively typing, so
+                // we don't overwrite what they're mid-way through.
+                .onChange(of: displayed) { _, new in
+                    if !focused { typing = "\(new)" }
+                }
+                .onSubmit {
+                    commitTyping()
+                }
+                .onChange(of: focused) { _, isFocused in
+                    if !isFocused { commitTyping() }
+                }
             // No `step:` on the Slider — that parameter makes SwiftUI
             // draw a tick mark for every step across the range (358 of
             // them at step:50 in [100, 18000]), which renders as a
@@ -167,5 +191,56 @@ private struct DPIAxisEditor: View {
                 }
             )
         }
+    }
+
+    /// Parse the TextField's text, clamp + snap to the DPI range and
+    /// step, commit to `value`, and re-format `typing` so a garbage
+    /// input like "abcd" doesn't stay stuck in the field.
+    private func commitTyping() {
+        // Strip commas / spaces so "1,600" or "1 600" work too.
+        let cleaned = typing.filter { $0.isNumber }
+        guard let raw = Int(cleaned) else {
+            // Bad input — snap back to whatever the current value is.
+            typing = "\(displayed)"
+            return
+        }
+        let clamped = min(max(raw, 100), 18000)
+        let snapped = (clamped / 50) * 50
+        // If the user typed the same value that's already there, no
+        // need to re-commit (which would trigger an apply pipeline).
+        if snapped != value {
+            value = snapped
+        }
+        typing = "\(snapped)"
+    }
+}
+
+// Small trailing "−" button that removes the row. Extracted from
+// DPIStageRow so it can carry its own hover state — the row-level minus
+// used to have no visual feedback on hover, which made it easy to
+// mistake for a static glyph.
+private struct RemoveStageButton: View {
+    let enabled: Bool
+    let onRemove: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onRemove) {
+            Image(systemName: "minus")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .foregroundStyle(isHovered && enabled ? Color.red : .secondary)
+                .background(
+                    Circle().fill(isHovered && enabled
+                                  ? Color.red.opacity(0.14)
+                                  : Color.secondary.opacity(0.10))
+                )
+                .animation(.easeInOut(duration: 0.12), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .onHover { isHovered = $0 && enabled }
+        .help("Remove this stage")
     }
 }

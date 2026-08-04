@@ -29,8 +29,20 @@ final class PanelController: NSObject, NSWindowDelegate {
         self.controller = controller
     }
 
+    /// Tray-icon click handler. Always brings the panel to front instead
+    /// of toggling closed — the user asked for "if already open, just
+    /// surface it, don't close-then-reopen." Dismissal still works: the
+    /// outside-click monitor (installed by `show()`) hides the panel
+    /// when the user clicks anywhere outside its frame.
     func toggle(anchor button: NSStatusBarButton?) {
-        if let w = window, w.isVisible { hide(); return }
+        if let w = window, w.isVisible {
+            // Already up — just re-front it and reactivate. Skip the
+            // repositioning pass so we don't yank the panel back to
+            // saved origin if the user just dragged it somewhere.
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         show(anchor: button)
     }
 
@@ -62,9 +74,14 @@ final class PanelController: NSObject, NSWindowDelegate {
         } else if let screen = NSScreen.main {
             let f = screen.frame, vis = screen.visibleFrame
             Log.info("panel show: screen.frame=\(f), visibleFrame=\(vis), intended=\(intended)")
+            // Use the window's real frame size (which includes titlebar
+            // chrome) instead of the intended content size. Otherwise the
+            // titlebar's extra ~28 pt of height puts frame.maxY above
+            // vis.maxY, clampOnScreen kicks in with its 8 pt safety
+            // margin, and the panel opens flush-minus-8 from the top.
             target = NSPoint(
-                x: vis.maxX - intended.width,
-                y: vis.maxY - intended.height
+                x: vis.maxX - w.frame.width,
+                y: vis.maxY - w.frame.height
             )
             Log.info("panel show: no saved origin — using top-right default (\(target.x), \(target.y))")
         } else {
@@ -96,13 +113,16 @@ final class PanelController: NSObject, NSWindowDelegate {
     /// UserDefaults keys for the persisted panel position. Namespaced so
     /// the value doesn't collide with anything the SwiftUI framework
     /// itself might write.
-    // v2 keys: earlier builds saved a programmatic origin on every
-    // setFrameOrigin, drifting the panel across launches. This build
-    // only saves on user drag, so start with a clean slate for
-    // everyone — the old .v1 (unversioned) keys stay untouched but
-    // are ignored.
-    private static let originXKey = "bskv3xhs.panel.originX.v2"
-    private static let originYKey = "bskv3xhs.panel.originY.v2"
+    // v3 keys: earlier builds computed the default origin from
+    // `intended.height` (content size) which excluded titlebar chrome —
+    // resulting in an initial position that clampOnScreen would nudge
+    // 8 pt down from the visible frame's top. Any origin saved from that
+    // window ended up 8 pt off; bumping the key namespace invalidates
+    // those stale values so the fixed default (flush 0 pt top-right)
+    // takes effect on the next open. Old v2/v1 keys stay in defaults
+    // but are ignored.
+    private static let originXKey = "bskv3xhs.panel.originX.v3"
+    private static let originYKey = "bskv3xhs.panel.originY.v3"
 
     /// True while `show()` is programmatically positioning the window.
     /// windowDidMove fires for both user drags AND our own setFrameOrigin
@@ -218,6 +238,13 @@ final class PanelController: NSObject, NSWindowDelegate {
         // matches standard macOS app behavior.
         w.isMovableByWindowBackground = false
         w.isReleasedWhenClosed = false
+        // Make the window itself transparent so the SwiftUI `.glassEffect()`
+        // in MainView's detail column (and the sidebar's own vibrancy
+        // material) can refract the desktop / apps behind, instead of
+        // compositing over the default opaque window background. macOS 26
+        // Liquid Glass looks flat without this.
+        w.isOpaque = false
+        w.backgroundColor = .clear
         // Hide all traffic-light buttons — user request. Keep .closable
         // in the styleMask (so Tahoe still renders the floating-sidebar
         // container treatment) but make the buttons themselves invisible.
@@ -228,6 +255,15 @@ final class PanelController: NSObject, NSWindowDelegate {
         // dismiss via the outside-click NSEvent monitor instead so the
         // tray → panel handshake stays deterministic.
         w.hidesOnDeactivate = false
+        // Follow the user across every Space (like the menu bar tray
+        // icon does) so switching desktops doesn't leave the settings
+        // window stranded on the Space it was opened from.
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Float above ordinary windows so the settings panel stays
+        // available while the user is working in another app — matches
+        // Synapse's "utility overlay" feel and the user's request that
+        // the panel be permanently on top.
+        w.level = .floating
         // Snap open — no zoom / genie animation.
         w.animationBehavior = .none
         w.center()

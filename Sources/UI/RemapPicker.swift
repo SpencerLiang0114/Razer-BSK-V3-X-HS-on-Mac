@@ -61,6 +61,11 @@ struct RemapPicker: View {
     @State private var launchName = ""
     @State private var launchURL  = ""
     @State private var textDraft  = ""
+    /// Local buffer for the Turbo rate slider — writes disk / re-applies
+    /// ButtonMap only on drag-end so mid-scrub values don't hammer save.
+    @State private var turboScrub: Int? = nil
+    /// Drives the "Learn" button for firmware-remapped side buttons.
+    @StateObject private var triggerCapture = KeyTriggerCapture()
 
     private var current: ButtonAction {
         draft.buttons.action(for: button)
@@ -79,27 +84,103 @@ struct RemapPicker: View {
             HStack(spacing: 0) {
                 CategoryList(selection: $selectedCategory)
                     .frame(width: 180)
-                Divider()
+                Divider().opacity(0.35)
                 ScrollView {
                     contentPane
                         .padding(.horizontal, 22)
                         .padding(.vertical, 18)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .background(Color(nsColor: .windowBackgroundColor))
             }
             // Turbo footer only shows once the button has a real action —
             // Default / Disable modes don't emit anything to repeat.
-            if current != .passthrough && current != .disabled {
+            // Also hidden for scroll-wheel direction buttons: wheel events
+            // are one-shot (no "up" event to stop a repeating timer), so
+            // a turbo timer would run forever. ButtonMap ignores turbo on
+            // scroll actions too; hiding the toggle keeps the UI honest.
+            if current != .passthrough && current != .disabled
+               && button != .scrollUp && button != .scrollDown {
                 Divider()
                 turboFooter
                     .padding(.horizontal, 20).padding(.vertical, 12)
-                    .background(Color(nsColor: .windowBackgroundColor))
+            }
+            // Firmware-remap footer. Only meaningful for the two side
+            // buttons — they're the ones Synapse remaps to keystrokes.
+            if button == .mouseButton4 || button == .mouseButton5 {
+                Divider()
+                firmwareTriggerFooter
+                    .padding(.horizontal, 20).padding(.vertical, 12)
             }
         }
         .frame(width: 760, height: 540)
-        .background(Color(nsColor: .windowBackgroundColor))
+        // Sheets on macOS ship with their own opaque presentation
+        // background — `.liquidGlassPanel()` alone can't override it.
+        // `.liquidGlassSheet()` swaps that default material out for our
+        // Liquid Glass surface so the whole sheet reads as one continuous
+        // glass panel, matching the main window.
+        .liquidGlassSheet()
         .onAppear { selectedCategory = initialCategory() }
+    }
+
+    // MARK: - Firmware-remap trigger footer
+
+    /// A mouse whose onboard profile was configured by Razer Synapse can have
+    /// its side buttons emit *keystrokes* instead of mouse buttons. macOS then
+    /// never generates `otherMouseDown` for them, so the event tap has nothing
+    /// to intercept and the button silently does nothing no matter what action
+    /// is assigned here.
+    ///
+    /// `ButtonMappings.triggers` is the escape hatch: record the keystroke the
+    /// button actually emits and the tap matches on that instead. The model and
+    /// tap sides shipped, but nothing could ever populate the dictionary — this
+    /// footer is that missing piece.
+    private var firmwareTriggerFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Firmware-remapped button")
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .help("If this button was remapped by Razer Synapse it sends a keyboard key, not a mouse button — so macOS never reports it as a mouse click and the action above never runs. Click Learn, then press the button once to capture what it actually sends.")
+                Spacer()
+                if draft.buttons.virtualTrigger(for: button) != nil {
+                    Button("Clear") {
+                        draft.buttons.setTrigger(nil, for: button)
+                        persistTrigger()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 10) {
+                Button(triggerCapture.isListening ? "Press the button now…" : "Learn") {
+                    triggerCapture.start { captured in
+                        draft.buttons.setTrigger(captured, for: button)
+                        persistTrigger()
+                    }
+                }
+                .disabled(triggerCapture.isListening)
+                Text(triggerDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(triggerCapture.isListening ? .primary : .secondary)
+            }
+        }
+    }
+
+    private var triggerDescription: String {
+        if triggerCapture.isListening {
+            return String(localized: "Listening — press the mouse button once.")
+        }
+        guard let t = draft.buttons.virtualTrigger(for: button) else {
+            return String(localized: "Not set. Use this only if the button does nothing.")
+        }
+        return String(localized: "Triggered by") + " " + KeyTriggerFormatter.describe(t)
+    }
+
+    private func persistTrigger() {
+        ButtonMap.shared.apply(draft.buttons)
+        SettingsStore.shared.updateActive { $0 = draft }
     }
 
     // MARK: - Turbo footer
@@ -130,11 +211,19 @@ struct RemapPicker: View {
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                     HStack(spacing: 10) {
                         // Editable text field + up/down stepper, matching
-                        // Synapse's Speed input.
+                        // Synapse's Speed input. Both read `turboScrub ??
+                        // turbo.rate` so mid-Slider-drag values show
+                        // consistently everywhere; both commit through
+                        // `setTurbo(...)` and clear `turboScrub` so any
+                        // pending scrub value doesn't shadow the just-
+                        // committed rate on the next read.
                         HStack(spacing: 0) {
                             TextField("", value: Binding(
-                                get: { turbo.rate },
-                                set: { setTurbo(TurboSettings(enabled: true, rate: min(20, max(1, $0)))) }
+                                get: { turboScrub ?? turbo.rate },
+                                set: {
+                                    setTurbo(TurboSettings(enabled: true, rate: min(20, max(1, $0))))
+                                    turboScrub = nil
+                                }
                             ), format: .number)
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 13, weight: .medium))
@@ -142,8 +231,11 @@ struct RemapPicker: View {
                                 .multilineTextAlignment(.center)
                                 .frame(width: 36)
                             Stepper("", value: Binding(
-                                get: { turbo.rate },
-                                set: { setTurbo(TurboSettings(enabled: true, rate: min(20, max(1, $0)))) }
+                                get: { turboScrub ?? turbo.rate },
+                                set: {
+                                    setTurbo(TurboSettings(enabled: true, rate: min(20, max(1, $0))))
+                                    turboScrub = nil
+                                }
                             ), in: 1...20)
                             .labelsHidden()
                         }
@@ -153,9 +245,15 @@ struct RemapPicker: View {
 
                         Text("1").font(.system(size: 10)).foregroundStyle(.secondary)
                         Slider(value: Binding(
-                            get: { Double(turbo.rate) },
-                            set: { setTurbo(TurboSettings(enabled: true, rate: Int($0.rounded()))) }
-                        ), in: 1...20)
+                            get: { Double(turboScrub ?? turbo.rate) },
+                            set: { turboScrub = min(20, max(1, Int($0.rounded()))) }
+                        ), in: 1...20,
+                        onEditingChanged: { editing in
+                            if !editing, let r = turboScrub {
+                                setTurbo(TurboSettings(enabled: true, rate: r))
+                                turboScrub = nil
+                            }
+                        })
                             .tint(.green)
                         Text("20").font(.system(size: 10)).foregroundStyle(.secondary)
                     }
@@ -319,17 +417,13 @@ struct RemapPicker: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isSelected
-                          ? Color.accentColor.opacity(0.08)
-                          : Color(nsColor: .quaternarySystemFill))
-            )
+            .selectableCard(selected: isSelected)
         }
         .buttonStyle(.plain)
         .disabled(!available)
         .opacity(available ? 1.0 : 0.45)
         .help(available ? "" : "Command not found on PATH. Install it, then reopen this picker.")
+        .hoverPointer()
     }
 
     private func iconName(for p: AIPreset) -> String {
@@ -394,16 +488,10 @@ struct RemapPicker: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(selected ? Color.accentColor.opacity(0.08) : Color(nsColor: .quaternarySystemFill))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(selected ? Color.accentColor.opacity(0.4) : Color(nsColor: .separatorColor).opacity(0.4), lineWidth: 0.5)
-            )
+            .selectableCard(selected: selected, stroke: .always)
         }
         .buttonStyle(.plain)
+        .hoverPointer()
     }
 
     /// Strips the `(⌘C)`-style suffix out of the preset label so the two-line
@@ -436,6 +524,13 @@ struct RemapPicker: View {
                 Text("Types text at the cursor.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
+        }
+        // Seed the editor from the current mapping so reopening the sheet
+        // on a button already bound to `.typeText("foo")` shows "foo"
+        // rather than an empty field. Mirrors `seedManualFromCurrent()`
+        // in the keyboard pane.
+        .onAppear {
+            if case .typeText(let s) = current { textDraft = s }
         }
     }
 
@@ -539,7 +634,7 @@ struct RemapPicker: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color.accentColor.opacity(0.15) : Color(nsColor: .quaternarySystemFill)))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor).opacity(0.4), lineWidth: 0.5))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? Color.accentColor.opacity(0.5) : DS.border, lineWidth: 0.5))
             .foregroundStyle(on ? Color.accentColor : Color.primary)
         }
         .buttonStyle(.plain)
@@ -597,9 +692,13 @@ struct RemapPicker: View {
             }
             Text("Go to a specific stage").font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary).padding(.top, 6)
+            // Range follows the profile's actual DPI stage count so a
+            // user with 3 stages can't bind `.specificStage(5)` and end
+            // up commanding the mouse to a stage that doesn't exist.
+            let stageCount = max(1, draft.dpi.stages.count)
             let cols = [GridItem(.adaptive(minimum: 100), spacing: 6)]
             LazyVGrid(columns: cols, alignment: .leading, spacing: 6) {
-                ForEach(1...5, id: \.self) { i in
+                ForEach(1...stageCount, id: \.self) { i in
                     chip("Stage \(i)", selected: current == .sensitivity(.specificStage(i))) {
                         commit(.sensitivity(.specificStage(i)))
                     }
@@ -684,12 +783,10 @@ struct RemapPicker: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isSelected ? Color.accentColor.opacity(0.08) : Color(nsColor: .quaternarySystemFill))
-            )
+            .selectableCard(selected: isSelected)
         }
         .buttonStyle(.plain)
+        .hoverPointer()
     }
 
     @ViewBuilder
@@ -704,14 +801,10 @@ struct RemapPicker: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(selected ? Color.accentColor.opacity(0.10) : Color(nsColor: .quaternarySystemFill))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(selected ? Color.accentColor.opacity(0.4) : Color.clear, lineWidth: 0.5)
-            )
+            .selectableCard(selected: selected,
+                            cornerRadius: 6,
+                            accentWashOpacity: 0.18,
+                            stroke: .selectedOnly)
         }
         .buttonStyle(.plain)
     }
@@ -727,6 +820,8 @@ private struct CategoryList: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+        // No solid background — the parent RemapPicker container carries
+        // the Liquid Glass surface, and stacking a second material on top
+        // muddies the effect on Tahoe. List keeps its own selection tint.
     }
 }

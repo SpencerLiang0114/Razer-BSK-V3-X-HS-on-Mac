@@ -147,12 +147,10 @@ struct LowBatterySettings: Codable, Equatable {
     /// extends AA life during the last stretch before replacement.
     /// Dimming rides on `.ram` writes so it never touches onboard flash.
     var dimLEDEnabled: Bool = true
-    /// Percentage below which alert + dim engage. Default 15 matches
-    /// Synapse's low-battery threshold for this mouse. Slider range in
-    /// the UI is 5–30; the decoder below clamps stored values into that
-    /// window so profiles from earlier builds (when the range extended
-    /// to 100) load with a sensible position instead of a slider that
-    /// visually caps below the stored number.
+    /// Percentage at (or below) which alert + dim engage. Default 15 matches
+    /// Synapse's low-battery threshold for this mouse. Full 1–100 range is
+    /// allowed so users who want per-1%-drop banners can just park it at
+    /// 100 — the per-drop cadence already lives in checkLowBatteryEvent.
     var threshold: Int = 15
 
     private enum CodingKeys: String, CodingKey { case alertEnabled, dimLEDEnabled, threshold }
@@ -166,7 +164,7 @@ struct LowBatterySettings: Codable, Equatable {
         alertEnabled = try c.decodeIfPresent(Bool.self, forKey: .alertEnabled) ?? true
         dimLEDEnabled = try c.decodeIfPresent(Bool.self, forKey: .dimLEDEnabled) ?? true
         let raw = try c.decodeIfPresent(Int.self, forKey: .threshold) ?? 15
-        threshold = min(30, max(5, raw))
+        threshold = min(100, max(1, raw))
     }
 }
 

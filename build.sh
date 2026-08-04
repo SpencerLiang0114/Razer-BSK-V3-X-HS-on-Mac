@@ -16,6 +16,12 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 echo "→ Compiling Swift sources"
+# NOTE: the `-not -name '._*'` filter below is load-bearing when the repo
+# lives on a non-HFS/APFS volume (exFAT, NTFS, SMB share). macOS stores
+# extended attributes for each file in a sidecar AppleDouble file named
+# `._<original>`, so `find Sources -name '*.swift'` returns 80 paths for a
+# 40-file tree and swiftc tries to compile 40 binary blobs — several hundred
+# bogus "cannot find 'T' in scope" errors that bury any real diagnostic.
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 xcrun swiftc \
     -sdk "$SDK_PATH" \
@@ -24,7 +30,7 @@ xcrun swiftc \
     -whole-module-optimization \
     -parse-as-library \
     -framework AppKit -framework SwiftUI -framework IOKit -framework Combine -framework CoreBluetooth -framework UserNotifications \
-    $(find Sources -name '*.swift') \
+    $(find Sources -name '*.swift' -not -name '._*') \
     -o "$APP_DIR/Contents/MacOS/$BIN_NAME"
 
 echo "→ Copying Info.plist and resources"
@@ -70,7 +76,33 @@ else
     IDENTITY="-"
     echo "→ Ad-hoc code signing (run setup-cert.sh once to make permissions stick)"
 fi
-codesign --force --deep --sign "$IDENTITY" "$APP_DIR" 2>&1 | grep -v "replacing existing signature" || true
+# Strip AppleDouble sidecars from the bundle before signing. On a non-native
+# volume every file we copied in has a `._<name>` twin holding its xattrs;
+# codesign walks the bundle, finds `Contents/MacOS/._BSKV3XHS`, and fails the
+# whole signature with "Operation not permitted". dot_clean folds those
+# sidecars back into the real files and removes them.
+if command -v dot_clean >/dev/null 2>&1; then
+    dot_clean -m "$APP_DIR" 2>/dev/null || true
+fi
+find "$APP_DIR" -name '._*' -delete 2>/dev/null || true
+
+# Signature failures must be fatal. This used to end in `|| true`, which meant
+# a failed sign still printed "✓ Built" and handed the user an unsigned app —
+# macOS then treats it as a different binary and silently drops its
+# Accessibility / Input Monitoring grants, so remapped buttons stop working
+# with nothing in the log to explain why.
+set -o pipefail
+if ! codesign --force --deep --sign "$IDENTITY" "$APP_DIR" 2>&1 | grep -v "replacing existing signature"; then
+    # grep exits 1 when it filtered every line (the normal quiet success
+    # case), so re-verify rather than trusting the pipeline's status.
+    if ! codesign --verify --deep "$APP_DIR" 2>/dev/null; then
+        echo "✗ Code signing FAILED — not writing a build you can't run." >&2
+        echo "  The app would launch but lose its TCC permissions (buttons would stop working)." >&2
+        exit 1
+    fi
+fi
+set +o pipefail
+echo "→ Signature verified"
 
 echo
 echo "✓ Built: $APP_DIR"

@@ -20,10 +20,22 @@ import AppKit
 /// `SettingsStore` (both @MainActor). `didActivateApplicationNotification`
 /// fires on the main queue by default, but binding it explicitly keeps
 /// the intent obvious.
+/// Compound identity for the newly-focused app. `bundleID` is the primary
+/// key when it's available; `executableName` (the last path component of
+/// `executableURL`) is the fallback we use to identify apps that never
+/// register a bundle identifier — most commonly Java-based games opened
+/// through a launcher (Minecraft via Prism/MultiMC), Electron apps run
+/// straight from source, or anything invoked as `java -jar ...`.
+struct FocusedAppIdentity {
+    let bundleID: String?
+    let executableName: String?
+}
+
 final class AppSwitchWatcher {
-    /// Delivered on the main queue. `bundleID` is nil when the newly-focused
-    /// process has no discoverable bundle identifier.
-    var onFocusChange: ((_ bundleID: String?) -> Void)?
+    /// Delivered on the main queue. Both fields can be nil (e.g. focus
+    /// on a helper daemon we can't classify) — DeviceController treats
+    /// that as "no trigger match, fall back to defaultID."
+    var onFocusChange: ((FocusedAppIdentity) -> Void)?
 
     private let excludeBundleID: String?
     private var observer: NSObjectProtocol?
@@ -46,11 +58,9 @@ final class AppSwitchWatcher {
         ) { [weak self] note in
             guard let self else { return }
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            let bid = app?.bundleIdentifier
-            // Ignore self-activation so opening the panel / clicking the
-            // tray doesn't revert an app-triggered profile switch.
-            if let bid, bid == self.excludeBundleID { return }
-            self.onFocusChange?(bid)
+            let identity = Self.identity(for: app)
+            if let bid = identity.bundleID, bid == self.excludeBundleID { return }
+            self.onFocusChange?(identity)
         }
 
         // Also listen for launch/terminate so the watcher can seed the
@@ -65,9 +75,9 @@ final class AppSwitchWatcher {
             object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            if let bid, bid == self.excludeBundleID { return }
-            self.onFocusChange?(bid)
+            let identity = Self.identity(for: NSWorkspace.shared.frontmostApplication)
+            if let bid = identity.bundleID, bid == self.excludeBundleID { return }
+            self.onFocusChange?(identity)
         }
 
         // Seed with the current frontmost so a profile bound to the app
@@ -77,9 +87,9 @@ final class AppSwitchWatcher {
         // seed can race with the on-launch profile push.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            if let bid, bid == self.excludeBundleID { return }
-            self.onFocusChange?(bid)
+            let identity = Self.identity(for: NSWorkspace.shared.frontmostApplication)
+            if let bid = identity.bundleID, bid == self.excludeBundleID { return }
+            self.onFocusChange?(identity)
         }
     }
 
@@ -87,5 +97,15 @@ final class AppSwitchWatcher {
         let nc = NSWorkspace.shared.notificationCenter
         if let observer { nc.removeObserver(observer); self.observer = nil }
         if let terminateObserver { nc.removeObserver(terminateObserver); self.terminateObserver = nil }
+    }
+
+    /// Extract the compound identity from an NSRunningApplication. The
+    /// executable name is derived from `executableURL.lastPathComponent`
+    /// so Java-launched games (bundleID nil, executable=/…/java) still
+    /// have something the trigger list can match on.
+    private static func identity(for app: NSRunningApplication?) -> FocusedAppIdentity {
+        let bid = app?.bundleIdentifier
+        let exe = app?.executableURL?.lastPathComponent
+        return FocusedAppIdentity(bundleID: bid, executableName: exe)
     }
 }

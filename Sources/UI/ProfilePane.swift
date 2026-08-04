@@ -98,10 +98,10 @@ struct ProfilePane: View {
         }
     }
 
-    /// One profile row in the picker card. Click activates. Right-side
-    /// shows the "Default" chip when this profile is the default fallback
-    /// for auto-switch. Trigger count is surfaced so users can spot which
-    /// profiles have rules attached without opening each one.
+    /// One profile row. Click activates. Row background flips to a
+    /// subtle accent wash when active so the state reads instantly
+    /// without hunting for the radio dot. Default chip on the right,
+    /// trigger-app count as a small footnote.
     @ViewBuilder
     private func profileRow(_ p: Profile) -> some View {
         let isActive = (p.id == store.file.activeID)
@@ -109,35 +109,47 @@ struct ProfilePane: View {
         Button {
             store.setActive(p.id)
         } label: {
-            HStack(spacing: 10) {
-                Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
-                    .font(.system(size: 15))
-                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
-                    .frame(width: 18, alignment: .center)
-                Text(p.name)
-                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
-                    .foregroundStyle(.primary)
-                if isDefault {
-                    Text("Default")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Color(nsColor: .quaternarySystemFill)))
+            HStack(spacing: 12) {
+                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(isActive ? Color.accentColor : Color.secondary.opacity(0.6))
+                    .symbolRenderingMode(.hierarchical)
+                    .frame(width: 20, alignment: .center)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(p.name)
+                            .font(.system(size: 13, weight: isActive ? .semibold : .medium))
+                            .foregroundStyle(.primary)
+                        if isDefault {
+                            Text("Default")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 6).padding(.vertical, 1)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.14)))
+                        }
+                    }
+                    if !p.triggerBundleIDs.isEmpty {
+                        Text(p.triggerBundleIDs.count == 1
+                             ? "1 linked app"
+                             : "\(p.triggerBundleIDs.count) linked apps")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
                 }
                 Spacer(minLength: 0)
-                if !p.triggerBundleIDs.isEmpty {
-                    Text(p.triggerBundleIDs.count == 1
-                         ? "1 app"
-                         : "\(p.triggerBundleIDs.count) apps")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isActive ? Color.accentColor.opacity(0.10) : Color.clear)
+            )
+            .hoverHighlight(cornerRadius: 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .hoverPointer()
     }
 
     private func suggestNewProfileName() -> String {
@@ -176,13 +188,40 @@ struct ProfilePane: View {
             }
             triggerAppsList(for: active)
             HStack {
-                Button {
-                    pickAppToAdd(profileID: active.id)
+                Menu {
+                    Button {
+                        pickAppToAdd(profileID: active.id)
+                    } label: {
+                        Label("Choose from Applications…", systemImage: "folder")
+                    }
+                    // Running-apps submenu — for cases where the trigger
+                    // isn't the visible /Applications binary (Minecraft
+                    // launched via a Java runtime, an Electron app whose
+                    // binary lives inside a package, a Steam game). The
+                    // user picks whichever process is actually frontmost
+                    // during gameplay so auto-switch picks it up.
+                    let running = runningAppsForPicker()
+                    if !running.isEmpty {
+                        Menu("Choose from running…") {
+                            ForEach(running, id: \.key) { entry in
+                                Button {
+                                    store.addTriggerBundleID(entry.key, to: active.id)
+                                } label: {
+                                    // Menu items don't render NSImages from
+                                    // Label automatically, so just show the
+                                    // localized name — icon shows up in the
+                                    // trigger list once linked.
+                                    Text(entry.name)
+                                }
+                            }
+                        }
+                    }
                 } label: {
                     Label("Add app…", systemImage: "plus")
                         .font(.system(size: 12))
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
                 Spacer()
             }
             .padding(.top, 4)
@@ -246,47 +285,63 @@ struct ProfilePane: View {
         }
     }
 
-    /// One trigger-app row. Icon on the left, resolved app name + bundle
-    /// ID stacked, remove button on the right. Icon size matches System
-    /// Settings' "Login Items" table so the row reads familiar.
+    /// One trigger-app row. Big icon + name, faint bundle-ID underneath
+    /// (helps users notice when two apps share a name), remove button on
+    /// the right. Uses `.thinMaterial` so it blends with the Card's own
+    /// material instead of sitting on top of it as an opaque slab.
     @ViewBuilder
     private func triggerAppRow(bundleID: String, profileID: UUID) -> some View {
         let resolved = resolveApp(bundleID)
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             appIcon(resolved: resolved)
-                .frame(width: 22, height: 22)
+                .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text(resolved?.name ?? bundleID)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                 Text(bundleID)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             Spacer()
             Button {
                 store.removeTriggerBundleID(bundleID, from: profileID)
             } label: {
-                Image(systemName: "minus.circle.fill")
+                Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
                     .font(.system(size: 14))
+                    .symbolRenderingMode(.hierarchical)
             }
             .buttonStyle(.plain)
             .help("Remove this app from the trigger list")
+            .hoverPointer()
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color(nsColor: .quaternarySystemFill).opacity(0.5))
-        )
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .selectableCard(selected: false, stroke: .always)
     }
 
-    /// Resolve a bundle ID to a location + display name using NSWorkspace's
-    /// bundle registry. Returns nil when the bundle isn't registered
-    /// anywhere — happens when the user uninstalls an app that's still
-    /// listed as a trigger.
-    private func resolveApp(_ bundleID: String) -> (url: URL, name: String)? {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
+    /// Resolve a trigger key (bundle ID or `exe:<name>`) to a display
+    /// location + name.
+    ///
+    ///  • Bundle-ID keys: look up in NSWorkspace's bundle registry.
+    ///    Returns nil when the app is uninstalled but still linked.
+    ///  • `exe:<name>` keys: look for a currently-running process with
+    ///    a matching executable name and use its icon + localized name.
+    ///    Falls back to a nil resolution if no such process is running
+    ///    — the row still renders (with the neutral glyph) and stays
+    ///    removable.
+    private func resolveApp(_ triggerKey: String) -> (url: URL, name: String)? {
+        if triggerKey.hasPrefix("exe:") {
+            let exe = String(triggerKey.dropFirst(4))
+            guard let match = NSWorkspace.shared.runningApplications.first(where: {
+                $0.executableURL?.lastPathComponent == exe
+            }), let url = match.executableURL else { return nil }
+            let name = match.localizedName ?? exe
+            return (url, name)
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: triggerKey),
               let bundle = Bundle(url: url) else { return nil }
         let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
                 ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
@@ -308,6 +363,34 @@ struct ProfilePane: View {
                 .font(.system(size: 18))
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    /// Snapshot the currently-running apps for the "Choose from running…"
+    /// submenu. Each entry's `key` is what we'll store in the trigger
+    /// list — either the bundle identifier (preferred) or an
+    /// `exe:<executable-name>` fallback when the process has no bundle
+    /// (Java-based games opened by Prism/MultiMC, Electron dev builds,
+    /// Steam-launched binaries — Activity Monitor still shows them but
+    /// they never register a proper Info.plist). Deduped by key so
+    /// multiple Chrome helpers don't spam the menu.
+    private func runningAppsForPicker() -> [(key: String, name: String)] {
+        var seen = Set<String>()
+        return NSWorkspace.shared.runningApplications
+            .compactMap { app -> (key: String, name: String)? in
+                let key: String
+                if let bid = app.bundleIdentifier, !bid.isEmpty {
+                    key = bid
+                } else if let exe = app.executableURL?.lastPathComponent, !exe.isEmpty {
+                    key = "exe:\(exe)"
+                } else {
+                    return nil
+                }
+                let name = app.localizedName ?? key
+                guard !name.isEmpty, !seen.contains(key) else { return nil }
+                seen.insert(key)
+                return (key: key, name: name)
+            }
+            .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
     }
 
     /// Open NSOpenPanel scoped to /Applications so users pick apps
@@ -362,5 +445,6 @@ private struct RenameProfileSheet: View {
         }
         .padding(20)
         .frame(width: 320)
+        .liquidGlassSheet()
     }
 }

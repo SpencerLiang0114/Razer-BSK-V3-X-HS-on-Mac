@@ -42,6 +42,10 @@ final class ScrollTransformer: @unchecked Sendable {
     // ─── Smoothing engine state ──────────────────────────────────────
     private var accumulatorY: Double = 0
     private var accumulatorX: Double = 0
+    // Modifier flags carried on the most recent real scroll event. Copied
+    // onto every synthesized pixel event `tick()` posts so downstream apps
+    // still see Shift/Option/etc — critical for Shift-scroll → horizontal.
+    private var lastFlags: CGEventFlags = []
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "bskv3xhs.scroll", qos: .userInteractive)
     private let lock = NSLock()
@@ -49,6 +53,12 @@ final class ScrollTransformer: @unchecked Sendable {
     /// 120 Hz drain. Fast enough that pixel steps look smooth; slow enough
     /// that we don't melt a laptop on stray taps.
     private let tickIntervalMs: Int = 8
+
+    /// Cached CGEventField for `kCGScrollWheelEventIsContinuous` (raw
+    /// value 88). Force-unwrapping this on every scroll event was a
+    /// hot-path unwrap for a value that's stable per process — a
+    /// `static let` computes it once at initialization.
+    private static let isContinuousField: CGEventField = CGEventField(rawValue: 88)!
 
     /// Approx pixels emitted per line-tick at speed=1.0. Chosen to feel
     /// close to macOS's own line-to-pixel conversion for a mouse wheel with
@@ -102,8 +112,7 @@ final class ScrollTransformer: @unchecked Sendable {
 
         // Trackpad / Magic Mouse smooth scroll has `IsContinuous` set. Leave
         // it alone — macOS's own physics is already doing the right thing.
-        // Field 88 = kCGScrollWheelEventIsContinuous.
-        if event.getIntegerValueField(CGEventField(rawValue: 88)!) != 0 {
+        if event.getIntegerValueField(Self.isContinuousField) != 0 {
             return .passthrough
         }
 
@@ -115,12 +124,27 @@ final class ScrollTransformer: @unchecked Sendable {
         if s.reverseVertical   { newDy = -newDy }
         if s.reverseHorizontal { newDx = -newDx }
 
+        // Shift-scroll → horizontal. macOS delegates this axis swap to the
+        // app layer (AppKit's NSScrollView, browsers, etc.) and most apps
+        // only honour it on line-based mouse-wheel events, not on the
+        // pixel-based continuous events we synthesise in tick(). So do the
+        // swap here and strip Shift from the outgoing event — that way the
+        // behaviour survives smoothing and no downstream app double-swaps
+        // back to vertical.
+        var outFlags = event.flags
+        if outFlags.contains(.maskShift) && newDy != 0 {
+            newDx = newDx &+ newDy
+            newDy = 0
+            outFlags.remove(.maskShift)
+        }
+
         if !s.smoothingEnabled || !sourceReady {
             // Non-smoothing path — mutate the incoming event with the
-            // reversed / scaled deltas and hand it back. This keeps the OS
-            // in charge of everything else about the event (phase, source,
-            // timestamp) and just changes the payload.
+            // reversed / scaled / axis-swapped deltas and hand it back.
+            // This keeps the OS in charge of everything else about the
+            // event (phase, source, timestamp) and just changes the payload.
             let pointScale = Int64(max(1.0, basePixelsPerLine * s.speed / 10.0).rounded())
+            event.flags = outFlags
             event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: newDy)
             event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: newDx)
             event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: newDy * pointScale)
@@ -132,10 +156,13 @@ final class ScrollTransformer: @unchecked Sendable {
         }
 
         // Smoothing path — accumulate a pixel budget and let tick() drain it.
+        // Snapshot the (Shift-stripped) modifier flags so tick()'s synthetic
+        // pixel events carry the remaining modifiers.
         let pixelsPerLine = basePixelsPerLine * s.speed
         lock.lock()
         accumulatorY += Double(newDy) * pixelsPerLine
         accumulatorX += Double(newDx) * pixelsPerLine
+        lastFlags = outFlags
         lock.unlock()
         ensureTimer()
         return .consumed
@@ -155,27 +182,48 @@ final class ScrollTransformer: @unchecked Sendable {
         }
     }
 
+    // ─── Pure smoothing math (testable) ──────────────────────────────
+    //
+    // The decay fraction and the round-and-subtract drain both used to
+    // live inline in tick(). Exposed as `static` helpers so
+    // `ScrollTransformerTests` can pin the invariants (monotonic
+    // fraction, convergence, remainder preservation) without needing
+    // to instantiate a shared singleton or route through CGEvent.
+
+    /// Per-tick emission fraction for the given smoothness knob.
+    /// Exponential decay: after ~`durationMs` worth of ticks, ~1% of the
+    /// original delta remains, so per-tick release fraction is
+    /// `1 - 0.01^(1/N)` where N = ticks in the duration.
+    /// Snappy = 100 ms tail, glide = 400 ms tail.
+    static func drainFraction(smoothness: Double, tickIntervalMs: Int) -> Double {
+        let durationMs = 100.0 + smoothness * 300.0
+        let ticksInDuration = durationMs / Double(tickIntervalMs)
+        return 1.0 - pow(0.01, 1.0 / max(1.0, ticksInDuration))
+    }
+
+    /// Round the fraction-emit result to whole pixels and return the
+    /// integer emit + the accumulator remainder that carries into the
+    /// next tick. Subtracting the rounded emit (not the raw
+    /// fractional emit) is what preserves sub-pixel intent across
+    /// ticks — slow flicks don't get truncated to zero.
+    static func drainStep(accumulator: Double, fraction: Double) -> (emit: Int32, remainder: Double) {
+        let raw = accumulator * fraction
+        let emit = Int32(raw.rounded())
+        return (emit, accumulator - Double(emit))
+    }
+
     /// Runs on `queue`. Drains a fraction of the accumulator, posts the
     /// integer-pixel remainder as a synthetic scrollWheel event, and stops
     /// the timer once there's nothing left to emit.
     private func tick() {
         lock.lock()
-        let smoothness = _settings.smoothness
-        // Exponential decay: after N ticks worth of `durationMs`, ~1% of the
-        // original delta remains. That maps to a per-tick release fraction
-        // of 1 - 0.01^(1/N). Snappy = 100 ms tail, glide = 400 ms tail.
-        let durationMs = 100.0 + smoothness * 300.0
-        let ticksInDuration = durationMs / Double(tickIntervalMs)
-        let fraction = 1.0 - pow(0.01, 1.0 / max(1.0, ticksInDuration))
+        let fraction = Self.drainFraction(smoothness: _settings.smoothness,
+                                          tickIntervalMs: tickIntervalMs)
 
-        let emitY = accumulatorY * fraction
-        let emitX = accumulatorX * fraction
-        // Snap to whole pixels for the post; keep the sub-pixel remainder
-        // in the accumulator so slow flicks don't get truncated to zero.
-        let iy = Int32(emitY.rounded())
-        let ix = Int32(emitX.rounded())
-        accumulatorY -= Double(iy)
-        accumulatorX -= Double(ix)
+        let (iy, remY) = Self.drainStep(accumulator: accumulatorY, fraction: fraction)
+        let (ix, remX) = Self.drainStep(accumulator: accumulatorX, fraction: fraction)
+        accumulatorY = remY
+        accumulatorX = remX
 
         let done = abs(accumulatorY) < 0.5 && abs(accumulatorX) < 0.5 && iy == 0 && ix == 0
         if done {
@@ -184,6 +232,7 @@ final class ScrollTransformer: @unchecked Sendable {
             accumulatorY = 0
             accumulatorX = 0
         }
+        let flags = lastFlags
         lock.unlock()
 
         if iy == 0 && ix == 0 { return }
@@ -194,6 +243,10 @@ final class ScrollTransformer: @unchecked Sendable {
                             units: .pixel,
                             wheelCount: 2,
                             wheel1: iy, wheel2: ix, wheel3: 0)
+        // Re-apply the modifiers from the most recent real scroll event so
+        // Shift-scroll → horizontal (and other modifier-driven behaviours)
+        // survive the smoothing round-trip.
+        event?.flags = flags
         event?.post(tap: .cghidEventTap)
     }
 }

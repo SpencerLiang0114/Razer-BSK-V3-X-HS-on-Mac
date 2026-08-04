@@ -116,7 +116,8 @@ struct ScrollPane: View {
                         .font(.system(size: 14, weight: .semibold))
                         .monospacedDigit()
                         .frame(width: 68, alignment: .leading)
-                    Slider(value: $draft.scroll.speed, in: 0.25...3.0)
+                    Slider(value: $draft.scroll.speed, in: 0.25...3.0,
+                           onEditingChanged: SliderCommitCoordinator.editingChanged)
                 }
                 HStack {
                     Text("0.25×").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -139,7 +140,8 @@ struct ScrollPane: View {
                         .font(.system(size: 14, weight: .semibold))
                         .monospacedDigit()
                         .frame(width: 68, alignment: .leading)
-                    Slider(value: $draft.scroll.smoothness, in: 0...1)
+                    Slider(value: $draft.scroll.smoothness, in: 0...1,
+                           onEditingChanged: SliderCommitCoordinator.editingChanged)
                         .disabled(!draft.scroll.smoothingEnabled)
                 }
                 HStack {
@@ -218,7 +220,8 @@ struct PowerPane: View {
                 Slider(
                     value: Binding(get: { Double(draft.idleMinutes) },
                                    set: { draft.idleMinutes = Int($0.rounded()) }),
-                    in: 1...15
+                    in: 1...15,
+                    onEditingChanged: SliderCommitCoordinator.editingChanged
                 )
                 .disabled(status.connection != .dongle)
             }
@@ -244,11 +247,10 @@ struct PowerPane: View {
         // Low-battery behaviour card. Matches Synapse's "battery low"
         // section — one shared threshold, two toggles for what triggers
         // (notification, LED auto-dim). Kept in Power pane so all battery-
-        // related knobs sit under one section header.
-        //
-        // Threshold caps at 30% — anything higher would fire the "battery
-        // low" banner while the AA still has half its life, and Synapse
-        // uses the same 5–30 range on this mouse.
+        // related knobs sit under one section header. Threshold spans the
+        // full 1–100 range so users who want a notification on every 1%
+        // drop can park the slider at 100 and let the per-drop cadence in
+        // checkLowBatteryEvent do the rest.
         Card(title: "Low battery") {
             HStack(spacing: 16) {
                 Text("\(draft.lowBattery.threshold)%")
@@ -260,19 +262,20 @@ struct PowerPane: View {
                         get: { Double(draft.lowBattery.threshold) },
                         set: { draft.lowBattery.threshold = Int($0.rounded()) }
                     ),
-                    in: 5...30
+                    in: 1...100,
+                    onEditingChanged: SliderCommitCoordinator.editingChanged
                 )
             }
             HStack {
-                Text("5%").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("1%").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
-                Text("30%").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text("100%").font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Divider().opacity(0.4).padding(.vertical, 2)
             Toggle(isOn: $draft.lowBattery.alertEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Notify at threshold").font(.system(size: 13, weight: .medium))
-                    Text("Sends a macOS notification when battery crosses the threshold, and again on each further drop.")
+                    Text("Show HUD at threshold").font(.system(size: 13, weight: .medium))
+                    Text("Pops a battery HUD in the top-right when the reading crosses the threshold, then again on every further drop.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }.toggleStyle(.switch)
@@ -296,6 +299,12 @@ struct DevicePane: View {
     @EnvironmentObject var controller: DeviceController
     @ObservedObject private var loginItem = LoginItem.shared
     @Binding var draft: AppSettings
+    /// Persistent toggle for `Log.debug(...)` output. Bound to the
+    /// same UserDefaults key `Log` reads on every debug call, so
+    /// flipping this takes effect immediately — no relaunch. Env var
+    /// `BSKV3XHS_DEBUG` (if set) overrides this at process start;
+    /// see `Log.debugOverriddenByEnv`.
+    @AppStorage(Log.debugPrefKey) private var debugLoggingEnabled = false
 
     private var connectionLabel: String {
         switch status.connection {
@@ -370,11 +379,50 @@ struct DevicePane: View {
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         Card(title: "Utilities") {
-            HStack(spacing: 10) {
+            // Debug logging toggle. Sits above the utility buttons so
+            // users investigating an issue see it before hitting "Show
+            // log" — the flow is "enable debug → reproduce → show log
+            // → send to me". Grey when the env var override is in
+            // effect (flipping wouldn't do anything then).
+            Toggle(isOn: $debugLoggingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Debug logging")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Records every button press, scroll tick, and Bluetooth state change to the log. Only enable while investigating a specific issue — the log grows fast.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(Log.debugOverriddenByEnv)
+            if Log.debugOverriddenByEnv {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Text("Overridden by the BSKV3XHS_DEBUG environment variable this session.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Divider().opacity(0.4).padding(.vertical, 2)
+
+            // Two-column grid so every utility button ends up the same
+            // size, aligned on the same baselines, regardless of label
+            // length. Previous nested HStack layout had the buttons wrap
+            // asymmetrically at narrower widths and let a short label
+            // ("Show log") sit next to a wide one ("Copy device info")
+            // with a jagged right edge.
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
+                                GridItem(.flexible(), spacing: 10)],
+                      spacing: 10) {
                 Button {
                     Task { await controller.refresh() }
                 } label: {
                     Label("Refresh from mouse", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .disabled(status.connection == .none)
@@ -390,20 +438,22 @@ struct DevicePane: View {
                     NSWorkspace.shared.activateFileViewerSelecting([SettingsStore.shared.fileURL])
                 } label: {
                     Label("Show settings.json", systemImage: "folder")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-            }
-            HStack(spacing: 10) {
+
                 Button { exportActiveProfile() } label: {
                     Label("Export profile", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
+
                 Button { importProfile() } label: {
                     Label("Import profile", systemImage: "square.and.arrow.down")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-            }
-            HStack(spacing: 10) {
+
                 Button {
                     let info = [
                         "Product: Razer Basilisk V3 X HyperSpeed",
@@ -417,6 +467,7 @@ struct DevicePane: View {
                     NSPasteboard.general.setString(info, forType: .string)
                 } label: {
                     Label("Copy device info", systemImage: "doc.on.doc")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
 
@@ -424,19 +475,27 @@ struct DevicePane: View {
                     NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
                 } label: {
                     Label("Show log", systemImage: "text.magnifyingglass")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
+
+                Button {
+                    Log.clear()
+                } label: {
+                    Label("Clear log", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .help("Wipe /tmp/bskv3xhs.log so the next repro starts fresh.")
             }
             Divider().padding(.vertical, 4)
-            HStack {
-                Spacer()
-                Button(role: .destructive) {
-                    NSApp.terminate(nil)
-                } label: {
-                    Label("Quit", systemImage: "power")
-                }
-                .buttonStyle(.bordered)
+            Button(role: .destructive) {
+                NSApp.terminate(nil)
+            } label: {
+                Label("Quit", systemImage: "power")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
         }
     }
 

@@ -115,6 +115,40 @@ final class BatterySmootherTests: XCTestCase {
         XCTAssertEqual(s.smooth(46, at: t(1)), 42)
     }
 
+    /// A real AA swap performed while the Mac was asleep must still be
+    /// detected on the first post-wake read.
+    ///
+    /// Regression: swap detection compared `pct` against
+    /// `samples.min() ?? pct`, so with the buffer emptied by
+    /// `clearSamplesPreservingAnchor` the test was `pct >= pct + swapJump`
+    /// — never true. The upward-step cap still applied (it reads
+    /// `lastDisplayed`, which survives), so the display crawled up
+    /// maxUpwardStep at a time: ~24 reads / ~18 min at production values,
+    /// versus an instant jump for the identical swap with no sleep in
+    /// between. Baseline now falls back to `lastDisplayed`.
+    func testSwapDetectedOnFirstReadAfterWake() {
+        var s = makeSmoother()
+        _ = s.smooth(25, at: t(0))
+        s.clearSamplesPreservingAnchor()
+        // 25 → 95 is far beyond swapJump(10): flush and show it at once,
+        // NOT 25 + maxUpwardStep(2) = 27.
+        XCTAssertEqual(s.smooth(95, at: t(1)), 95,
+                       "AA swapped during sleep must land in one read")
+    }
+
+    /// The empty-buffer fallback must not fire on a genuinely fresh
+    /// smoother: with no samples AND no anchor there is nothing for a
+    /// reading to be a swap relative to, so the first value passes
+    /// through untouched.
+    func testFirstEverReadHasNoSwapBaseline() {
+        var s = makeSmoother()
+        XCTAssertEqual(s.smooth(80, at: t(0)), 80)
+        // Same after a full reset, which clears the anchor too.
+        s.reset()
+        XCTAssertEqual(s.smooth(12, at: t(1)), 12,
+                       "post-reset read is unconstrained in both directions")
+    }
+
     // MARK: - Boundary: single-sample smoother
 
     /// The maintenance branch only runs when `count > 1`, so a smoother

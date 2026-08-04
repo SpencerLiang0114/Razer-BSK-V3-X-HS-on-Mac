@@ -47,6 +47,12 @@ final class GATTBattery: NSObject {
     /// Reconnect attempt count for exponential backoff on didDisconnect.
     /// Reset on any successful discovery or on radio poweredOn transition.
     fileprivate var reconnectAttempts: Int = 0
+    /// The most recent in-flight reconnect Task. Cancelled before each new
+    /// disconnect fires so a burst of disconnect events doesn't queue up
+    /// several sleeping Tasks that all wake and call `manager.connect(...)`
+    /// at once — the backoff formula is only meaningful if there's a single
+    /// pending attempt at a time. Also cancelled on successful `didConnect`.
+    fileprivate var reconnectTask: Task<Void, Never>? = nil
 
     override init() {
         super.init()
@@ -69,7 +75,7 @@ final class GATTBattery: NSObject {
     /// tends to be the one that actually delivers on this mouse.
     func refresh() {
         let s = manager.state
-        Log.info("gatt refresh: state=\(stateName(s))")
+        Log.info(.gatt, "refresh: state=\(stateName(s))")
         guard s == .poweredOn else { return }
         // If we already have a live peripheral with the characteristic
         // subscribed, do nothing — notifications will push new values.
@@ -108,13 +114,13 @@ final class GATTBattery: NSObject {
         // the service is exposed post-connect. Filtering by name in the
         // callback is safer than pre-filtering by service UUID here.
         manager.scanForPeripherals(withServices: nil, options: nil)
-        Log.info("gatt: started scan (name-filter, no service pre-filter)")
+        Log.info(.gatt, "started scan (name-filter, no service pre-filter)")
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Self.scanDuration * 1_000_000_000))
             guard let self, self.isScanning else { return }
             self.manager.stopScan()
             self.isScanning = false
-            Log.info("gatt: scan window expired")
+            Log.info(.gatt, "scan window expired")
         }
     }
 
@@ -152,9 +158,12 @@ final class GATTBattery: NSObject {
         var found: CBPeripheral? = nil
         for svc in probeServices {
             let candidates = manager.retrieveConnectedPeripherals(withServices: [svc])
-            Log.info("gatt: retrieveConnectedPeripherals(\(svc.uuidString)) returned \(candidates.count) candidate(s)")
+            // Trace-level: dumps every service probe's candidate list.
+            // Useful when the mouse isn't being found on a specific Mac,
+            // noise otherwise. Debug-only.
+            Log.debug(.gatt, "retrieveConnectedPeripherals(\(svc.uuidString)) returned \(candidates.count) candidate(s)")
             for p in candidates {
-                Log.info("  · name=\"\(p.name ?? "?")\" id=\(p.identifier.uuidString) state=\(peripheralStateName(p.state))")
+                Log.debug(.gatt, "  · name=\"\(p.name ?? "?")\" id=\(p.identifier.uuidString) state=\(peripheralStateName(p.state))")
             }
             if let m = candidates.first(where: { p in
                 let name = (p.name ?? "").lowercased()
@@ -165,10 +174,10 @@ final class GATTBattery: NSObject {
             }
         }
         guard let p = found else {
-            Log.info("gatt: no connected candidate matched — falling back to scan")
+            Log.debug(.gatt, "no connected candidate matched — falling back to scan")
             return
         }
-        Log.info("gatt: matched \"\(p.name ?? "?")\" state=\(peripheralStateName(p.state))")
+        Log.info(.gatt, "matched \"\(p.name ?? "?")\" state=\(peripheralStateName(p.state))")
         peripheral = p
         p.delegate = self
         if p.state == .connected {
@@ -195,7 +204,9 @@ extension GATTBattery: CBCentralManagerDelegate {
         let state = central.state
         Task { @MainActor [weak self] in
             guard let self else { return }
-            Log.info("gatt centralManagerDidUpdateState: \(self.stateName(state))")
+            // BT stack state changes are frequent noise (unauthorized →
+            // resetting → poweredOn is common at launch). Debug-only.
+            Log.debug(.gatt, "centralManagerDidUpdateState: \(self.stateName(state))")
             if state == .poweredOn {
                 self.reconnectAttempts = 0
                 self.refresh()
@@ -219,7 +230,7 @@ extension GATTBattery: CBCentralManagerDelegate {
             guard let self else { return }
             let lower = name.lowercased()
             guard lower.contains("basilisk") || lower.contains("bsk v3 x") else { return }
-            Log.info("gatt scan discovered \"\(name)\" rssi=\(RSSI)")
+            Log.info(.gatt, "scan discovered \"\(name)\" rssi=\(RSSI)")
             self.manager.stopScan()
             self.isScanning = false
             self.peripheral = peripheral
@@ -232,8 +243,14 @@ extension GATTBattery: CBCentralManagerDelegate {
         let name = peripheral.name ?? "?"
         Task { @MainActor [weak self] in
             guard let self else { return }
-            Log.info("gatt didConnect: \(name)")
+            Log.info(.gatt, "didConnect: \(name)")
             self.reconnectAttempts = 0
+            // A pending reconnect Task from an earlier disconnect is now
+            // moot — the peripheral is connected. Cancel it so its
+            // scheduled `manager.connect(...)` doesn't fire on top of a
+            // live connection.
+            self.reconnectTask?.cancel()
+            self.reconnectTask = nil
             // Kick discovery for battery AND device info in one call — the
             // scan path did battery only, and DIS (firmware/serial) would
             // then never populate over BT without a follow-up refresh.
@@ -250,17 +267,24 @@ extension GATTBattery: CBCentralManagerDelegate {
         let errMsg = error.map { "\($0)" }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            Log.info("gatt didDisconnect: \(name)\(errMsg.map { " — \($0)" } ?? "")")
+            Log.info(.gatt, "didDisconnect: \(name)\(errMsg.map { " — \($0)" } ?? "")")
             // BT stack sometimes drops the peripheral during radio nap.
             // Reconnect with exponential backoff so an out-of-range or
             // unpaired mouse doesn't produce infinite reconnect churn on
             // the BT radio (each failed attempt wakes it briefly).
             // Attempts reset to zero on a successful poweredOn/refresh.
+            //
+            // Cancel any prior in-flight reconnect Task first — several
+            // rapid disconnects would otherwise each spawn their own
+            // sleeping Task and all wake to call `manager.connect(...)`
+            // simultaneously, undermining the backoff.
+            self.reconnectTask?.cancel()
             let attempt = self.reconnectAttempts
             self.reconnectAttempts = min(attempt + 1, 6)
             let delayNs: UInt64 = UInt64(min(30_000, 500 * (1 << min(6, attempt)))) * 1_000_000
-            Task { @MainActor [weak self] in
+            self.reconnectTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: delayNs)
+                if Task.isCancelled { return }
                 guard let self, self.manager.state == .poweredOn else { return }
                 self.manager.connect(peripheral, options: nil)
             }
@@ -273,7 +297,10 @@ extension GATTBattery: CBPeripheralDelegate {
         let svcUUIDs = (peripheral.services ?? []).map { $0.uuid.uuidString }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            Log.info("gatt didDiscoverServices: \(svcUUIDs)")
+            // Discovery detail — useful when the mouse doesn't expose
+            // the expected 180F service on a specific Mac, noise
+            // otherwise. Debug-only.
+            Log.debug(.gatt, "didDiscoverServices: \(svcUUIDs)")
             for s in (peripheral.services ?? []) {
                 if s.uuid == self.batteryService {
                     peripheral.discoverCharacteristics([self.batteryLevel], for: s)
@@ -296,7 +323,8 @@ extension GATTBattery: CBPeripheralDelegate {
         let charUUIDs = (service.characteristics ?? []).map { $0.uuid.uuidString }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            Log.info("gatt didDiscoverCharacteristicsFor \(service.uuid.uuidString): \(charUUIDs)")
+            // Same reasoning as didDiscoverServices — trace-level.
+            Log.debug(.gatt, "didDiscoverCharacteristicsFor \(service.uuid.uuidString): \(charUUIDs)")
             for c in (service.characteristics ?? []) {
                 if c.uuid == self.batteryLevel {
                     peripheral.readValue(for: c)
@@ -320,17 +348,20 @@ extension GATTBattery: CBPeripheralDelegate {
             guard let self, let data = value, !data.isEmpty else { return }
             if uuid == self.batteryLevel {
                 let pct = Int(data[0])
-                Log.info("gatt didUpdateValueFor \(uuid.uuidString): raw=\(pct)")
+                // Raw pre-smoothing reading. The smoothed value lands
+                // via DeviceController's `battery: X → Y` info line so
+                // the raw one is trace-level noise otherwise.
+                Log.debug(.gatt, "didUpdateValueFor \(uuid.uuidString): raw=\(pct)")
                 guard pct >= 0, pct <= 100 else { return }
                 self.onBattery?(pct)
             } else if uuid == self.firmwareRevision {
                 if let s = String(data: data, encoding: .utf8) {
-                    Log.info("gatt firmware revision: \"\(s)\"")
+                    Log.info(.gatt, "firmware revision: \"\(s)\"")
                     self.onFirmware?(s.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
             } else if uuid == self.serialNumber {
                 if let s = String(data: data, encoding: .utf8) {
-                    Log.info("gatt serial number: \"\(s)\"")
+                    Log.info(.gatt, "serial number: \"\(s)\"")
                     self.onSerial?(s.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
             }

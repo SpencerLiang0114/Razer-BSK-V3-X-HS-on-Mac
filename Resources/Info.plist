@@ -33,6 +33,8 @@
     <string>Personal use only.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Read the mouse's battery level over Bluetooth.</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>Read the mouse's battery, DPI, and lighting state, and detect when it wakes. Without this the app cannot talk to the mouse at all.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>

@@ -107,6 +107,23 @@ final class RazerProtocolTests: XCTestCase {
         XCTAssertEqual(y, 45000, "60000 clamps down to 45000")
     }
 
+    func testDPIStagesWriteClampsActiveIntoStageRange() {
+        let stages = [(x: 800, y: 800), (x: 1600, y: 1600)]
+        // args[1] is the active-stage byte.
+        // Past the end of the list → clamps down to the last stage. An
+        // unclamped UInt8(active) would put 7 on the wire, which the
+        // firmware NAKs, silently dropping the whole DPI-stages apply.
+        XCTAssertEqual(Razer.dpiStagesWrite(active: 7, stages: stages)[8 + 1], 2)
+        // Zero / negative → clamps up to 1. These would trap the process on
+        // a bare UInt8() conversion rather than merely misbehave.
+        XCTAssertEqual(Razer.dpiStagesWrite(active: 0, stages: stages)[8 + 1], 1)
+        XCTAssertEqual(Razer.dpiStagesWrite(active: -3, stages: stages)[8 + 1], 1)
+        // In-range values pass through untouched.
+        XCTAssertEqual(Razer.dpiStagesWrite(active: 2, stages: stages)[8 + 1], 2)
+        // A value far outside UInt8 — the case that actually crashes.
+        XCTAssertEqual(Razer.dpiStagesWrite(active: 9999, stages: stages)[8 + 1], 2)
+    }
+
     // MARK: - Idle-minutes builder
 
     func testIdleTimeWriteBigEndianMinutes() {
@@ -151,5 +168,45 @@ final class RazerProtocolTests: XCTestCase {
     func testBrightnessWirePayload() {
         let f = Razer.brightnessWrite(0x80)
         XCTAssertEqual(f[8 + 2], 0x80)
+    }
+
+    // MARK: - Device mode
+
+    /// Read frame must be class 0x00 / id 0x84 with data_size 0x02, matching
+    /// OpenRazer's razer_chroma_standard_get_device_mode.
+    func testDeviceModeReadFrame() {
+        let f = Razer.deviceModeRead()
+        XCTAssertEqual(f[6], 0x00, "standard class")
+        XCTAssertEqual(f[7], 0x84, "get_device_mode command id")
+        XCTAssertEqual(f[5], 0x02, "data_size is 2")
+        XCTAssertEqual(f[88], Razer.crc(f))
+    }
+
+    /// Write frame is class 0x00 / id 0x04, args = [mode, 0x00].
+    func testDeviceModeWriteFrame() {
+        let f = Razer.deviceModeWrite(.normal)
+        XCTAssertEqual(f[6], 0x00)
+        XCTAssertEqual(f[7], 0x04, "set_device_mode command id")
+        XCTAssertEqual(f[5], 0x02)
+        XCTAssertEqual(f[8], 0x00, "normal mode")
+        XCTAssertEqual(f[9], 0x00, "param is always zero")
+    }
+
+    /// Driver mode (0x03) is what Synapse leaves behind and what we need to
+    /// be able to detect — the whole point of reading the latch.
+    func testDeviceModeDriverRoundTrips() {
+        XCTAssertEqual(Razer.DeviceMode(rawValue: 0x03), .driver)
+        XCTAssertEqual(Razer.DeviceMode(rawValue: 0x00), .normal)
+        XCTAssertNil(Razer.DeviceMode(rawValue: 0x07), "unknown byte stays unknown")
+        let f = Razer.deviceModeWrite(.driver)
+        XCTAssertEqual(f[8], 0x03)
+    }
+
+    /// Factory-test mode (0x02) makes the buttons emit raw keystrokes.
+    /// OpenRazer refuses to write it; so must we — coerced to normal.
+    func testDeviceModeFactoryTestIsCoercedToNormal() {
+        let f = Razer.deviceModeWrite(.factoryTest)
+        XCTAssertEqual(f[8], 0x00, "0x02 must never reach the wire")
+        XCTAssertEqual(f[9], 0x00)
     }
 }

@@ -35,7 +35,7 @@ private struct KeyBadge: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 4)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.4), lineWidth: 0.5)
+                .stroke(DS.border, lineWidth: 0.5)
         )
     }
 }
@@ -68,8 +68,11 @@ private func keyBadgeLabel(_ code: UInt16) -> BadgeGlyph {
     case kVK_DownArrow:     return BadgeGlyph(text: nil, symbol: "arrow.down")
     case kVK_PageUp:        return BadgeGlyph(text: nil, symbol: "arrow.up.to.line")
     case kVK_PageDown:      return BadgeGlyph(text: nil, symbol: "arrow.down.to.line")
-    case kVK_Home:          return BadgeGlyph(text: "Home", symbol: nil)
-    case kVK_End:           return BadgeGlyph(text: "End",  symbol: nil)
+    // "Home" / "End" go through String(localized:) so the badge picks
+    // up the user's locale — zh-Hans users saw literal English inside
+    // an otherwise fully-translated shortcut chip.
+    case kVK_Home:          return BadgeGlyph(text: String(localized: "Home"), symbol: nil)
+    case kVK_End:           return BadgeGlyph(text: String(localized: "End"),  symbol: nil)
     default:
         return BadgeGlyph(text: keyDisplayString(code), symbol: nil)
     }
@@ -111,8 +114,9 @@ func keyDisplayString(_ code: UInt16) -> String {
     case kVK_DownArrow:     return "↓"
     case kVK_PageUp:        return "⇞"
     case kVK_PageDown:      return "⇟"
-    case kVK_Home:          return "Home"
-    case kVK_End:           return "End"
+    // See `keyBadgeLabel` above — same localization reasoning.
+    case kVK_Home:          return String(localized: "Home")
+    case kVK_End:           return String(localized: "End")
     case kVK_Space:         return "Space"
     case kVK_Return:        return "Return"
     case kVK_Tab:           return "Tab"

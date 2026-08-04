@@ -83,13 +83,9 @@ struct MouseDiagram: View {
             )
 
             ZStack(alignment: .topLeading) {
-                // Photo — with a subtle rounded rect white "canvas" behind it
-                // so the transparent PNG reads cleanly on any window bg.
-                RoundedRectangle(cornerRadius: 24)
-                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.35))
-                    .frame(width: imgSize, height: imgSize)
-                    .position(x: rect.midX, y: rect.midY)
-
+                // No canvas behind the mouse image — the transparent PNG
+                // sits directly on the Card's Liquid Glass, matching what
+                // the user asked for (grey backdrop removed).
                 if let img = mouseImage() {
                     Image(nsImage: img)
                         .resizable()
@@ -167,15 +163,25 @@ struct MouseDiagram: View {
         // Use translation instead of location so the dot doesn't jump under
         // the cursor on mouse-down (user may click near the edge of the dot
         // and expect it to stay where it was until they actually move).
+        //
+        // The start position is cached on the FIRST onChanged tick — reading
+        // `normalizedHotspot(...)` on every tick would read the value we
+        // just wrote via `onMoveHotspot?` on the previous tick, so
+        // `translation` (which is cumulative from gesture start) would
+        // walk the dot away from the cursor. Callout drag uses the same
+        // pattern below.
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { g in
                 guard editing else { return }
-                let start = normalizedHotspot(for: btn, default: layouts[btn]?.anchor ?? CGPoint(x: 0.5, y: 0.5))
+                let start = dragStartHotspot[btn.rawValue]
+                    ?? normalizedHotspot(for: btn, default: layouts[btn]?.anchor ?? CGPoint(x: 0.5, y: 0.5))
+                if dragStartHotspot[btn.rawValue] == nil {
+                    dragStartHotspot[btn.rawValue] = start
+                }
                 let dxN = g.translation.width / rect.width
                 let dyN = g.translation.height / rect.height
                 let nx = clampNorm(start.x + dxN)
                 let ny = clampNorm(start.y + dyN)
-                dragStartHotspot[btn.rawValue] = start
                 onMoveHotspot?(btn, NormalizedPoint(x: Double(nx), y: Double(ny)))
             }
             .onEnded { _ in dragStartHotspot[btn.rawValue] = nil }
@@ -219,7 +225,7 @@ private struct HotspotDot: View {
                 // Extra ring in edit mode so the user can see it's grabbable.
                 if editing {
                     Circle()
-                        .stroke(Color.accentColor.opacity(0.4), lineWidth: 6)
+                        .stroke(DS.accentBorderSubtle, lineWidth: 6)
                         .frame(width: 26, height: 26)
                 }
             }
@@ -262,16 +268,30 @@ private struct Callout: View {
         }
         .buttonStyle(.plain)
         .disabled(!button.remappable && !editing)
+        .scaleEffect(hovering && (button.remappable || editing) ? 1.03 : 1.0)
+        .shadow(color: .black.opacity(hovering && (button.remappable || editing) ? 0.10 : 0.05),
+                radius: hovering ? 4 : 2, y: 1)
+        .animation(.easeInOut(duration: 0.12), value: hovering)
         .help(editing
               ? "Drag to move this label — click Done to finish"
               : (button.remappable ? "Click to remap" : "Handled by mouse firmware / OS"))
-        .onHover { hovering in
-            // Open-hand cursor when the label is grabbable — SwiftUI doesn't
-            // otherwise cue that "click here" changed to "drag here."
-            guard editing else { return }
-            if hovering { NSCursor.openHand.push() } else { NSCursor.pop() }
+        .onHover { inside in
+            hovering = inside
+            // Editing mode: open-hand cursor to signal "drag me here."
+            // Normal mode with a remappable button: pointing-hand to
+            // signal "click to open the remap picker." Non-remappable
+            // buttons (Left Click, DPI Cycle) stay on the default arrow.
+            if editing {
+                if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+            } else if button.remappable {
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
         }
     }
+
+    // Local hover state, drives scale + shadow above. Kept per-Callout so
+    // hover on one callout doesn't puff up its neighbours.
+    @State private var hovering: Bool = false
 
     private var strokeColor: Color {
         if editing { return Color.accentColor.opacity(0.6) }

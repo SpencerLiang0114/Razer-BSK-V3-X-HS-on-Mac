@@ -71,23 +71,38 @@ final class SettingsCodableTests: XCTestCase {
 
     // MARK: - LowBatterySettings clamp
 
-    /// Earlier builds let the threshold range 5..100; the current UI
-    /// slider is 5..30. A saved threshold of 80 must clamp on load so
-    /// the slider is not visibly capped below its stored value.
-    func testLowBatteryThresholdClampsIntoUIRange() throws {
+    /// The decoder clamps to 1...100 — the same range the UI slider
+    /// now exposes. Anything outside gets pulled to the nearest valid
+    /// end so a hand-edited settings.json can't put the mouse into an
+    /// unreachable threshold state.
+    func testLowBatteryThresholdClampsAboveMax() throws {
         let json = """
-        { "alertEnabled": true, "dimLEDEnabled": true, "threshold": 80 }
+        { "alertEnabled": true, "dimLEDEnabled": true, "threshold": 200 }
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(LowBatterySettings.self, from: json)
-        XCTAssertEqual(decoded.threshold, 30, "clamps down to 30")
+        XCTAssertEqual(decoded.threshold, 100, "clamps down to 100")
     }
 
-    func testLowBatteryThresholdClampsBelow() throws {
+    func testLowBatteryThresholdClampsBelowMin() throws {
         let json = """
-        { "alertEnabled": true, "dimLEDEnabled": true, "threshold": 1 }
+        { "alertEnabled": true, "dimLEDEnabled": true, "threshold": -5 }
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(LowBatterySettings.self, from: json)
-        XCTAssertEqual(decoded.threshold, 5, "clamps up to 5")
+        XCTAssertEqual(decoded.threshold, 1, "clamps up to 1")
+    }
+
+    /// Values inside the valid 1...100 range pass through untouched —
+    /// including the ones the old test file expected the decoder to
+    /// clamp (5 and 80). Range broadened to support the "per-1%
+    /// banners" preset (threshold=100).
+    func testLowBatteryThresholdPassesThroughInRange() throws {
+        for raw in [1, 5, 15, 30, 80, 100] {
+            let json = """
+            { "alertEnabled": true, "dimLEDEnabled": true, "threshold": \(raw) }
+            """.data(using: .utf8)!
+            let decoded = try JSONDecoder().decode(LowBatterySettings.self, from: json)
+            XCTAssertEqual(decoded.threshold, raw, "raw=\(raw) should pass through")
+        }
     }
 
     // MARK: - DPIConfig xyIndependent

@@ -77,6 +77,9 @@
 
 /* ─── Power pane ──────────────────────────────────────────────── */
 "Battery level" = "电量";
+/* HUD title (DPIStageHUD) — distinct from the "Battery at %lld%%." strings
+   further down, which are the low-battery notification body. */
+"Battery %lld%%" = "电量 %lld%%";
 "Battery is low — consider replacing the AA" = "电量偏低——建议更换 AA 电池";
 "1× AA. macOS refreshes the reading every ~30 s." = "1 节 AA 电池，macOS 大约每 30 秒刷新一次读数。";
 "1× AA. Smoothed over 30 min to hide AA voltage recovery." = "1 节 AA 电池。读数在 30 分钟窗口内平滑处理，避免 AA 电压恢复带来的跳变。";
@@ -111,6 +114,10 @@
 "Re-read onboard settings" = "重新读取鼠标内置设置";
 "Re-read battery" = "重新读取电量";
 "Mouse not connected" = "鼠标未连接";
+/* Shown once, as a HUD, when we detect the mouse arrived still latched into
+   Synapse's driver mode (side buttons emit nothing macOS can see) and we've
+   reset it to normal. See Razer.DeviceMode. */
+"Mouse was left in Synapse driver mode — reset to normal. Buttons 4/5 work again." = "鼠标此前被 Synapse 留在了驱动模式——已重置为正常模式，第 4/5 键恢复可用。";
 
 /* ─── Buttons pane ────────────────────────────────────────────── */
 "Accessibility permission required" = "需要辅助功能权限";
@@ -180,6 +187,9 @@
 "Text to type" = "要输入的文字";
 "Types text at the cursor." = "按下按键时在光标处输入这段文字。";
 "Shortcut" = "快捷键";
+"Triggered by" = "触发键为";
+"Listening — press the mouse button once." = "正在监听——请按一次该鼠标按键。";
+"Not set. Use this only if the button does nothing." = "未设置。仅当该按键完全没有反应时才需要用到。";
 "…or type a URL below" = "…或在下方输入 URL";
 "Display name" = "显示名称";
 "URL or file:// path" = "URL 或 file:// 路径";
@@ -235,6 +245,10 @@
 "Profile" = "配置文件";
 "DPI stage" = "DPI 档位";
 "Stage %lld — %@ DPI" = "档位 %lld — %@ DPI";
+/* Keys are matched case-sensitively — TrayController asks for "Open Panel"
+   with a capital P. The lowercase variant below predates that call site and
+   never matched, so the tray's first row rendered in English on a zh UI. */
+"Open Panel" = "打开设置";
 "Open panel" = "打开设置";
 "Refresh" = "刷新";
 "Dismiss" = "关闭";
@@ -306,10 +320,13 @@
 /* ─── Low-battery behaviour ───────────────────────────────────── */
 "Low battery" = "低电量";
 "Notify at threshold" = "达到阈值时通知";
+"Show HUD at threshold" = "达到阈值时弹 HUD";
+"Pops a battery HUD in the top-right when the reading crosses the threshold, then again on every further drop." = "电量首次跌破阈值时在右上角弹一次电池 HUD，之后每再掉一个百分点再弹一次。";
 "Send a macOS notification once when battery drops below the threshold." = "电量首次跌破阈值时，发送一次 macOS 系统通知。";
 "Dim LED at threshold" = "达到阈值时降亮";
 "Cut LED brightness in half to extend AA life. Doesn't touch flash." = "将 LED 亮度减半以延长 AA 电池寿命，不写入内置存储。";
 "Battery at %lld%% — replace the AA soon." = "电量剩余 %lld%% — 建议尽快更换 AA 电池。";
+"Battery at %lld%%." = "电量剩余 %lld%%。";
 "BSK V3 X HS" = "BSK V3 X HS";
 
 /* ─── Profile import / export ─────────────────────────────────── */
@@ -370,4 +387,20 @@
 
 /* ─── Low-battery notification (multi-drop copy) ──────────────── */
 "Sends a macOS notification when battery crosses the threshold, and again on each further drop." = "首次跌破阈值时发送 macOS 通知；之后每再往下跌都会重新通知。";
+
+/* ─── Utilities pane ──────────────────────────────────────────── */
+"Debug logging" = "调试日志";
+"Records every button press, scroll tick, and Bluetooth state change to the log. Only enable while investigating a specific issue — the log grows fast." = "把每一次按键、滚动和蓝牙状态变化都写入日志。仅在排查具体问题时开启，日志会增长得很快。";
+"Overridden by the BSKV3XHS_DEBUG environment variable this session." = "本次会话由 BSKV3XHS_DEBUG 环境变量覆盖。";
+"Clear log" = "清空日志";
+"Wipe /tmp/bskv3xhs.log so the next repro starts fresh." = "清空 /tmp/bskv3xhs.log，让下一次复现从空白开始。";
+
+/* ─── Key badge glyphs ────────────────────────────────────────── */
+"Home" = "起始";
+"End" = "末尾";
+
+/* ─── Terminal launch error HUD ───────────────────────────────── */
+"Couldn't launch Terminal" = "无法启动“终端”";
+"Terminal automation blocked. Enable it in System Settings → Privacy & Security → Automation." = "“终端”自动化权限已被拒绝。请在系统设置 → 隐私与安全性 → 自动化中启用。";
+"Terminal launch failed. See log for details." = "启动“终端”失败，详情见日志。";
 

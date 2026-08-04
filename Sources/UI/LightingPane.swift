@@ -97,7 +97,8 @@ struct LightingPane: View {
                 Slider(value: Binding(
                     get: { Double(draft.lighting.brightness) },
                     set: { draft.lighting.brightness = Int($0.rounded()) }
-                ), in: 0...100)
+                ), in: 0...100,
+                       onEditingChanged: SliderCommitCoordinator.editingChanged)
             }
             Text("Applies to the scroll wheel LED (the only light on this mouse).")
                 .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 4)
@@ -191,22 +192,19 @@ struct LightingPane: View {
     }
 
     private func swatchButton(_ s: RGB) -> some View {
-        Button {
-            setColor(s)
-        } label: {
-            Circle()
-                .fill(Color(nsColor: NSColor(srgbRed: CGFloat(s.r)/255,
-                                             green:   CGFloat(s.g)/255,
-                                             blue:    CGFloat(s.b)/255,
-                                             alpha: 1)))
-                .frame(width: 22, height: 22)
-                .overlay(
-                    Circle().stroke(currentColor == s ? Color.accentColor : Color(nsColor: .separatorColor).opacity(0.5),
-                                    lineWidth: currentColor == s ? 2 : 0.5)
-                )
-        }
-        .buttonStyle(.plain)
-        .help("Set to #\(String(format: "%02X%02X%02X", s.r, s.g, s.b))")
+        SwatchButton(color: s,
+                     selected: currentColor == s,
+                     tickColor: swatchTickColor(for: s),
+                     onTap: { setColor(s) })
+    }
+
+    /// Pick a tick color that stays legible on any swatch. Uses the
+    /// perceptual luminance formula (Rec. 601 coefficients) so bright
+    /// swatches (white, yellow) get a black tick and dark swatches
+    /// (black, deep blue) get a white tick.
+    private func swatchTickColor(for s: RGB) -> Color {
+        let luminance = 0.299 * Double(s.r) + 0.587 * Double(s.g) + 0.114 * Double(s.b)
+        return luminance > 140 ? .black : .white
     }
 
     private func subtitle(for m: LightingEffect.Mode) -> String {
@@ -232,4 +230,53 @@ struct LightingPane: View {
         RGB(r: 200, g: 0,   b: 255),        // purple
         RGB(r: 255, g: 0,   b: 128),        // magenta
     ]
+}
+
+// Extracted from `swatchButton(_:)` so it can hold `@State` for the
+// hover indicator without leaking that state into the surrounding pane.
+// A per-swatch @State is safe here because SwiftUI keys these by view
+// identity (position in the swatch row) — hover on one doesn't bleed
+// into the neighbours.
+private struct SwatchButton: View {
+    let color: RGB
+    let selected: Bool
+    let tickColor: Color
+    let onTap: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        let hex = String(format: "%02X%02X%02X", color.r, color.g, color.b)
+        // Selected wins visually (accent ring + tick). Hover on unselected
+        // swatches thickens the neutral separator ring and lifts the swatch
+        // 6 % so users can see they've landed on a target.
+        let strokeColor: Color = selected
+            ? Color.accentColor
+            : (isHovered
+               ? Color.primary.opacity(0.55)
+               : Color(nsColor: .separatorColor).opacity(0.5))
+        let strokeWidth: CGFloat = selected ? 2 : (isHovered ? 1.25 : 0.5)
+        Button(action: onTap) {
+            ZStack {
+                Circle()
+                    .fill(Color(nsColor: NSColor(srgbRed: CGFloat(color.r)/255,
+                                                 green:   CGFloat(color.g)/255,
+                                                 blue:    CGFloat(color.b)/255,
+                                                 alpha: 1)))
+                    .frame(width: 22, height: 22)
+                    .overlay(Circle().stroke(strokeColor, lineWidth: strokeWidth))
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(tickColor)
+                }
+            }
+            .scaleEffect(isHovered && !selected ? 1.06 : 1.0)
+            .animation(.easeInOut(duration: 0.12), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Set to #\(hex)")
+        .accessibilityLabel(Text("Color #\(hex)"))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
 }

@@ -78,6 +78,58 @@ enum Razer {
     static func serialRead() -> [UInt8]   { frame(class: 0x00, id: 0x82, args: Array(repeating: 0, count: 22)) }
     static func batteryRead() -> [UInt8]  { frame(class: 0x07, id: 0x80, args: [0, 0]) }
 
+    // ─── Device mode (the Synapse "driver mode" latch) ────────────────
+    //
+    // Razer mice have a global mode byte that decides HOW button presses
+    // leave the device:
+    //
+    //   0x00 — Normal / hardware mode. The mouse emits standard HID mouse
+    //          reports. macOS turns side-button presses into
+    //          `otherMouseDown` with buttonNumber 3 / 4, which is the only
+    //          thing our CGEventTap can see.
+    //   0x03 — Driver mode. The mouse stops emitting standard HID reports
+    //          for the extra buttons and instead ships raw button state
+    //          over the *vendor* interface, expecting a driver (Synapse)
+    //          to read it and decide what to do. With no Synapse running,
+    //          those presses go nowhere: macOS never generates an event,
+    //          so no event tap — ours or anyone's — can observe them.
+    //   0x02 — Undocumented factory-test mode. OpenRazer explicitly blocks
+    //          writing it and so do we.
+    //
+    // Synapse sets 0x03 when it takes over a device. The latch lives in the
+    // mouse, not the host, so a mouse that was last used with Synapse on
+    // Windows arrives on macOS still in driver mode — side buttons dead,
+    // left/right/wheel fine (those stay on the boot-protocol path). That is
+    // exactly the "I used real Synapse before and now buttons 4/5 do
+    // nothing" failure, and it survives re-pairing and reboots because it's
+    // stored on the device.
+    //
+    // Wire format matches OpenRazer's razer_chroma_standard_set_device_mode
+    // / _get_device_mode: class 0x00, id 0x04 (write) / 0x84 (read),
+    // data_size 0x02, args = [mode, param]. `param` is always 0x00.
+    enum DeviceMode: UInt8 {
+        case normal = 0x00
+        case factoryTest = 0x02
+        case driver = 0x03
+
+        var label: String {
+            switch self {
+            case .normal:      return "normal"
+            case .factoryTest: return "factory-test"
+            case .driver:      return "driver (Synapse)"
+            }
+        }
+    }
+
+    static func deviceModeRead() -> [UInt8] { frame(class: 0x00, id: 0x84, args: [0, 0]) }
+
+    /// Write the device mode. `.factoryTest` is coerced to `.normal` — it
+    /// makes the buttons emit keystrokes and OpenRazer blocks it too.
+    static func deviceModeWrite(_ mode: DeviceMode) -> [UInt8] {
+        let m: UInt8 = (mode == .factoryTest) ? DeviceMode.normal.rawValue : mode.rawValue
+        return frame(class: 0x00, id: 0x04, args: [m, 0x00])
+    }
+
     // Idle sleep timer — how many minutes of no input before the mouse
     // powers down its radio. OpenRazer: cls=0x07 id=0x03, 2-byte value in
     // minutes (big-endian). Read: cls=0x07 id=0x83.
@@ -112,7 +164,15 @@ enum Razer {
     }
     static func dpiStagesWrite(active: Int, stages: [(x: Int, y: Int)], storage: Storage = .onboard) -> [UInt8] {
         precondition(!stages.isEmpty && stages.count <= 5)
-        var args: [UInt8] = [storage.rawValue, UInt8(active), UInt8(stages.count)]
+        // Clamp `active` into 1...stages.count here, at the protocol boundary,
+        // the same way `dpiWrite` / `idleTimeWrite` / `lightingReactive` clamp
+        // their own inputs. A bare `UInt8(active)` traps the process on a
+        // negative or >255 value, and a value inside UInt8 but past the end of
+        // the stage list is silently NAKed by the firmware — dropping the
+        // whole DPI apply. Callers do clamp today; this makes the frame
+        // builder correct on its own terms rather than by convention.
+        let activeByte = UInt8(max(1, min(stages.count, active)))
+        var args: [UInt8] = [storage.rawValue, activeByte, UInt8(stages.count)]
         for (i, s) in stages.enumerated() {
             let cx = UInt16(max(100, min(45000, s.x))), cy = UInt16(max(100, min(45000, s.y)))
             args += [UInt8(i + 1),

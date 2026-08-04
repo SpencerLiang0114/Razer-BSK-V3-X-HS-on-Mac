@@ -37,6 +37,27 @@ final class Service {
         return Int(round(Double(r.args[1]) / 255.0 * 100.0))
     }
 
+    // ─── Device mode ────────────────────────────────────────────────
+    // See Razer.DeviceMode for why this matters: a mouse left in driver
+    // mode by Synapse emits nothing macOS can see for buttons 4/5.
+
+    /// Read the mouse's current device mode. Returns nil when the firmware
+    /// answers with a byte outside the known set, rather than guessing.
+    func deviceMode(profile: RetryProfile = .full) async throws -> Razer.DeviceMode? {
+        let r = try await device.transact(Razer.deviceModeRead(), profile: profile)
+        return Razer.DeviceMode(rawValue: r.args[0])
+    }
+
+    /// Raw mode byte — for logging an unrecognized value verbatim.
+    func deviceModeRaw(profile: RetryProfile = .full) async throws -> UInt8 {
+        let r = try await device.transact(Razer.deviceModeRead(), profile: profile)
+        return r.args[0]
+    }
+
+    func setDeviceMode(_ mode: Razer.DeviceMode, profile: RetryProfile = .short) async throws {
+        _ = try await device.transact(Razer.deviceModeWrite(mode), profile: profile)
+    }
+
     /// Read idle-sleep timer, expressed as minutes.
     func idleMinutes(profile: RetryProfile = .full) async throws -> Int {
         let r = try await device.transact(Razer.idleTimeRead(), profile: profile)
