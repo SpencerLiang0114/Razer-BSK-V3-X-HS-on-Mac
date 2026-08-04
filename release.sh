@@ -35,8 +35,38 @@ bash build.sh
 # then codesign the .app themselves — see README.
 BUILT_APP="build/${APP_NAME}.app"
 echo "→ Re-signing release binary with ad-hoc identity (no personal info)"
+# Strip AppleDouble sidecars again before re-signing. build.sh already did
+# this before *its* signature, but signing writes new files into the bundle
+# and on a non-native volume (exFAT / NTFS / SMB) each one immediately gets
+# a fresh `._<name>` twin. codesign then walks the bundle, finds
+# `Contents/MacOS/._BSKV3XHS`, and aborts with "Operation not permitted" —
+# which under `set -e` killed the release before any artifact was written.
+strip_sidecars() {
+    if command -v dot_clean >/dev/null 2>&1; then
+        dot_clean -m "$1" 2>/dev/null || true
+    fi
+    find "$1" -name '._*' -delete 2>/dev/null || true
+}
+strip_sidecars "$BUILT_APP"
 /usr/bin/codesign --remove-signature "$BUILT_APP" 2>/dev/null || true
+strip_sidecars "$BUILT_APP"
 /usr/bin/codesign --force --deep --sign - "$BUILT_APP"
+# Verify the ad-hoc signature took. A release binary that fails Gatekeeper's
+# basic integrity check reads to users as "app is damaged", so this must be
+# fatal rather than something they discover after downloading.
+if ! /usr/bin/codesign --verify --deep --strict "$BUILT_APP"; then
+    echo "✗ Ad-hoc re-sign failed verification — refusing to package." >&2
+    exit 1
+fi
+# Confirm the personal identity is actually gone: an Apple Development cert
+# embeds the developer's email, and the whole point of this step is to keep
+# that out of a public download.
+if /usr/bin/codesign -dvv "$BUILT_APP" 2>&1 | /usr/bin/grep -q '^Authority='; then
+    echo "✗ Release binary still carries a certificate chain — not shipping it." >&2
+    /usr/bin/codesign -dvv "$BUILT_APP" 2>&1 | /usr/bin/grep '^Authority=' >&2
+    exit 1
+fi
+echo "→ Ad-hoc signature verified, no personal identity embedded"
 
 DIST_DIR="dist"
 mkdir -p "$DIST_DIR"
@@ -54,9 +84,19 @@ echo "→ Zipping .app → $ZIP_PATH"
 # ─── Build the .dmg ───────────────────────────────────────────────
 DMG_NAME="${RELEASE_NAME}-${VERSION}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
-STAGE="$DIST_DIR/dmg-stage"
-rm -rf "$STAGE" "$DMG_PATH"
-mkdir -p "$STAGE"
+rm -f "$DMG_PATH"
+
+# Stage and build the DMG on a native (APFS) temp volume rather than in
+# dist/. When the repo lives on exFAT/NTFS/SMB, macOS writes an AppleDouble
+# `._<name>` sidecar beside every file it creates — including one for the
+# /Applications symlink — and `hdiutil create -srcfolder` refuses the whole
+# folder with "Operation not permitted". Stripping them doesn't help,
+# because each new write regenerates them; staging off-volume avoids the
+# problem entirely instead of racing it.
+STAGE=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/bskv3xhs-dmg.XXXXXX")
+TMP_DMG="$STAGE.dmg"
+cleanup_stage() { rm -rf "$STAGE" "$TMP_DMG"; }
+trap cleanup_stage EXIT
 
 # Layout: .app + Applications symlink (drag-to-install convention).
 echo "→ Staging DMG contents"
@@ -65,15 +105,18 @@ echo "→ Staging DMG contents"
 
 echo "→ Creating $DMG_PATH"
 # UDZO = compressed read-only, standard for release DMGs.
-# `hdiutil create` doesn't like an existing target — we removed it above.
 /usr/bin/hdiutil create \
     -volname "$APP_NAME $VERSION" \
     -srcfolder "$STAGE" \
     -ov \
     -format UDZO \
-    "$DMG_PATH" >/dev/null
+    "$TMP_DMG" >/dev/null
 
-rm -rf "$STAGE"
+# Move the finished image onto the repo volume. ditto rather than mv so the
+# copy survives a cross-filesystem move cleanly.
+/usr/bin/ditto "$TMP_DMG" "$DMG_PATH"
+cleanup_stage
+trap - EXIT
 
 # ─── Report ───────────────────────────────────────────────────────
 echo
