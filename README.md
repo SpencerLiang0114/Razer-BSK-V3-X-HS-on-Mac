@@ -88,7 +88,7 @@ a Windows machine.
 3. First launch: right-click the app → **Open** to bypass Gatekeeper's
    unsigned-app warning. Or run once:
    ```
-   xattr -dr com.apple.quarantine "/Applications/Razer BSK V3 X HS.app"
+   xattr -dr com.apple.quarantine "/Applications/BSK V3 X HS.app"
    ```
 4. Grant *Input Monitoring* and *Accessibility* (see below) so vendor
    commands and button remap can reach the mouse.

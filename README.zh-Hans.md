@@ -81,7 +81,7 @@ Razer 官方 Synapse 至今没有 Basilisk V3 X HyperSpeed 的 macOS 版本，�
 3. 首次打开：右键 app → **打开**（绕过 Gatekeeper 的"未验证"警告），
    或者跑一次：
    ```
-   xattr -dr com.apple.quarantine "/Applications/Razer BSK V3 X HS.app"
+   xattr -dr com.apple.quarantine "/Applications/BSK V3 X HS.app"
    ```
 4. 授权 *Input Monitoring* 和 *Accessibility*（下面详细讲）—— vendor
    命令和按键重映射才能到鼠标。
