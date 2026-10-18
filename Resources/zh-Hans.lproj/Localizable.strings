@@ -218,6 +218,7 @@
 "Go to a specific stage" = "跳到指定档位";
 
 /* ─── Lighting pane ───────────────────────────────────────────── */
+"Scroll wheel light" = "滚轮灯光";
 "Effect" = "灯效";
 "Brightness" = "亮度";
 "Color" = "颜色";
